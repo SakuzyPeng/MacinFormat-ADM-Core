@@ -468,3 +468,16 @@ fn tiny_gain_is_not_silently_muted_and_tiny_priority_loss_is_reported() {
         Some("importance")
     );
 }
+
+#[test]
+fn damf_identity_fields_cannot_be_yaml_indicators_or_implicit_booleans() {
+    let s = MasterSpec {
+        profile: Profile::DamfHome,
+        creation_tool: "-".into(),
+        creation_tool_version: "yes".into(),
+        ..Default::default()
+    };
+    let manifest = macin_atmos::metadata::damf_manifest(&s).unwrap();
+    assert!(manifest.contains("    creationTool: \"-\"\n"));
+    assert!(manifest.contains("    creationToolVersion: \"yes\"\n"));
+}

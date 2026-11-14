@@ -589,13 +589,28 @@ pub fn damf_manifest(spec: &MasterSpec) -> Result<String> {
 
 fn yaml_plain_or_quote(value: &str) -> String {
     let plain = !value.is_empty()
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
         && value.trim() == value
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_'))
         && !matches!(
             value.to_ascii_lowercase().as_str(),
-            "true" | "false" | "null" | ".nan" | ".inf" | "-.inf"
+            "true"
+                | "false"
+                | "null"
+                | "yes"
+                | "no"
+                | "on"
+                | "off"
+                | "y"
+                | "n"
+                | ".nan"
+                | ".inf"
+                | "-.inf"
         )
         && value.parse::<f64>().is_err();
     if plain {
