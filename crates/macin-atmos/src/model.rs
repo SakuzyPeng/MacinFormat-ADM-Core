@@ -444,11 +444,11 @@ impl MasterSpec {
         ] {
             valid_text(text)?;
         }
+        // DAMF members append extensions, so a stem may end in a dot or space.
         if self.stem.is_empty()
             || matches!(self.stem.as_str(), "." | "..")
             || self.stem.contains(['/', '\\', ':'])
             || self.stem.chars().any(char::is_control)
-            || self.stem.ends_with(['.', ' '])
         {
             return Err(Error::invalid(
                 "DAMF stem must be a safe single filename component",

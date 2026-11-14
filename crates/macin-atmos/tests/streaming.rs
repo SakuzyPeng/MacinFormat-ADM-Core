@@ -481,3 +481,38 @@ fn damf_identity_fields_cannot_be_yaml_indicators_or_implicit_booleans() {
     assert!(manifest.contains("    creationTool: \"-\"\n"));
     assert!(manifest.contains("    creationToolVersion: \"yes\"\n"));
 }
+
+#[test]
+fn damf_stems_preserve_trailing_dots_and_spaces() {
+    let tmp = Temp::new();
+    for profile in [Profile::DamfHome, Profile::DamfThreeDof] {
+        for (index, stem) in ["master.", "master "].into_iter().enumerate() {
+            let path = tmp.path(&format!("{profile:?}-{index}"));
+            let mut spec = spec(profile, 48_000);
+            spec.stem = stem.into();
+            let mut writer = MasterWriter::create(&path, spec).unwrap();
+            writer.write_block(PcmBlock::S24Le(&[0; 33]), &[]).unwrap();
+            assert_eq!(writer.finish().unwrap().frames, 1);
+
+            let manifest = fs::read_to_string(path.join(format!("{stem}.atmos"))).unwrap();
+            for suffix in ["metadata", "audio"] {
+                let name = format!("{stem}.atmos.{suffix}");
+                assert!(path.join(&name).is_file());
+                assert!(manifest.contains(&format!("    {suffix}: \"{name}\"\n")));
+            }
+            assert_eq!(fs::read_dir(path).unwrap().count(), 3);
+        }
+    }
+}
+
+#[test]
+fn damf_stems_reject_empty_paths_and_control_characters() {
+    let tmp = Temp::new();
+    for stem in ["", ".", "..", "a/b", "a\\b", "a:b", "a\n", "a\0"] {
+        let mut spec = spec(Profile::DamfHome, 48_000);
+        spec.stem = stem.into();
+        let error = MasterWriter::create(tmp.path("invalid"), spec).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
+    }
+    assert_eq!(fs::read_dir(&tmp.0).unwrap().count(), 0);
+}
