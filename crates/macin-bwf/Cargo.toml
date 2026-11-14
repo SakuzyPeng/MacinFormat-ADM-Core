@@ -1,5 +1,8 @@
 [package]
 name = "macin-bwf"
+description = "RIFF, RF64, and BW64 audio containers with ADM metadata support"
+readme = "../../README.md"
+include = ["src/**", "tests/**", "README.md", "LICENSE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,8 @@
 [package]
 name = "macin-atmos"
+description = "Streaming ADM BWF and DAMF Atmos master authoring"
+readme = "../../README.md"
+include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

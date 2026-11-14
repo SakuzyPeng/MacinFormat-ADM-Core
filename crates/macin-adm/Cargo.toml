@@ -1,5 +1,8 @@
 [package]
 name = "macin-adm"
+description = "ADM metadata parsing, projection, generation, and lossless editing"
+readme = "../../README.md"
+include = ["src/**", "tests/**", "assets/**", "README.md", "LICENSE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -3,7 +3,8 @@
 通用 ADM/BWF 读写与 Atmos 母版写入 · Rust 2024 · MSRV 1.98 · MIT
 
 本仓库统一文件格式能力，供渲染、解码导出、对象聚类与编码工具使用。各消费方拥有自己的场景与算法模型。
-初版为私有 Git 依赖，所有 crate 设置 `publish = false`。
+源码通过公开 GitHub 仓库分发，Git 依赖可固定到提交。
+三个 crate 已准备 `0.1.0` 包元数据，后续上传步骤见 [crates.io 发布准备](docs/CRATES_IO_RELEASE.md)。
 
 | crate | 入口与职责 |
 | --- | --- |
