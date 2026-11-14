@@ -203,7 +203,8 @@ impl Document {
         }
         output.push_str(&self.xml.source[cursor..]);
         // A malformed generated document must never reach the container writer.
-        Document::parse(&output)?;
+        let definitions = self.track_uids.values().cloned().collect::<Vec<_>>();
+        Document::parse_with_track_uids(&output, &definitions)?;
         Ok(output)
     }
 }

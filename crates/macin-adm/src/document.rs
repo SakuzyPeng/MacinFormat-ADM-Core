@@ -1,11 +1,20 @@
 use crate::{
     Error, Result,
-    xml::{Node, Tree},
+    xml::{Attribute, Node, Tree},
 };
 use std::{collections::HashMap, sync::OnceLock};
 
 pub(crate) const COMMON: u32 = 1 << 31;
 static COMMON_DEFINITIONS: OnceLock<Result<Tree>> = OnceLock::new();
+
+/// CHNA 提供的 ADM 轨道定义。`format_id` 为 AT ID 或去掉 `_00` 填充的 AC ID。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackUidDefinition {
+    pub uid: String,
+    pub format_id: String,
+    /// CHNA 的 packRef 为空时使用 `None`，保留 AXML 中已有的 pack 引用。
+    pub pack_id: Option<String>,
+}
 
 #[derive(Debug)]
 pub struct Document {
@@ -14,6 +23,7 @@ pub struct Document {
     pub(crate) ids: HashMap<String, u32>,
     pub(crate) elements: Vec<u32>,
     track_streams: HashMap<u32, u32>,
+    pub(crate) track_uids: HashMap<u32, TrackUidDefinition>,
 }
 
 pub(crate) fn canonical_id(value: &str) -> String {
@@ -82,6 +92,12 @@ fn afe(tree: &Tree, common: bool) -> Result<usize> {
 
 impl Document {
     pub fn parse(source: &str) -> Result<Self> {
+        Self::parse_with_track_uids(source, &[])
+    }
+
+    /// 在引用校验前合并 CHNA 的轨道定义，补全缺失的 UID、format 和 pack 引用。
+    /// 与 AXML 或其他定义冲突时返回错误。原始 XML 和既有节点编号保留用于回写。
+    pub fn parse_with_track_uids(source: &str, definitions: &[TrackUidDefinition]) -> Result<Self> {
         let common = COMMON_DEFINITIONS
             .get_or_init(|| Tree::parse(include_str!("../assets/common_definitions.xml")))
             .as_ref()
@@ -95,6 +111,7 @@ impl Document {
             ids: HashMap::new(),
             elements: Vec::new(),
             track_streams: HashMap::new(),
+            track_uids: HashMap::new(),
         };
         for (tree, parent, flag) in [(common, common_afe, COMMON), (&doc.xml, local_afe, 0)] {
             for &index in &tree.nodes[parent].children {
@@ -118,6 +135,7 @@ impl Document {
                 }
             }
         }
+        doc.merge_track_uids(local_afe, definitions)?;
         // Resolve every modeled relationship, including those not used by a renderer.
         for &key in doc.ids.values() {
             let node = doc.node(key);
@@ -153,6 +171,101 @@ impl Document {
         doc.check_cycles("audioObject", "audioObjectIDRef")?;
         doc.check_cycles("audioPackFormat", "audioPackFormatIDRef")?;
         Ok(doc)
+    }
+
+    fn merge_track_uids(
+        &mut self,
+        parent: usize,
+        definitions: &[TrackUidDefinition],
+    ) -> Result<()> {
+        for definition in definitions {
+            let uid = canonical_id(&definition.uid);
+            validate_id(&uid, "ATU")?;
+            if uid == "ATU_00000000" {
+                return Err(Error::xml("CHNA 不能定义保留的静音 UID"));
+            }
+            let format_id = canonical_id(&definition.format_id);
+            let (prefix, reference) = if format_id.starts_with("AC_") {
+                ("AC", "audioChannelFormatIDRef")
+            } else {
+                ("AT", "audioTrackFormatIDRef")
+            };
+            validate_id(&format_id, prefix)?;
+            let pack_id = definition.pack_id.as_deref().map(canonical_id);
+            if let Some(pack) = &pack_id {
+                validate_id(pack, "AP")?;
+            }
+            for id in std::iter::once(&format_id).chain(pack_id.iter()) {
+                if !self.ids.contains_key(id) {
+                    return Err(Error::xml(format!("CHNA {uid} 引用了不存在的 {id}")));
+                }
+            }
+            let key = if let Some(&key) = self.ids.get(&uid) {
+                key
+            } else {
+                if self.xml.nodes.len() >= COMMON as usize {
+                    return Err(Error::unsupported("ADM 节点表过大"));
+                }
+                let key = self.xml.nodes.len() as u32;
+                let parent = &self.xml.nodes[parent];
+                let node = Node {
+                    name: parent.qualified("audioTrackUID"),
+                    local: "audioTrackUID".to_owned(),
+                    namespace: parent.namespace.clone(),
+                    attributes: vec![Attribute {
+                        name: "UID".to_owned(),
+                        value: uid.clone(),
+                    }],
+                    text: String::new(),
+                    children: Vec::new(),
+                    start: 0,
+                    open_end: 0,
+                    close_start: 0,
+                    end: 0,
+                    empty: true,
+                };
+                self.xml.nodes.push(node);
+                self.ids.insert(uid.clone(), key);
+                self.elements.push(key);
+                key
+            };
+            for name in ["audioTrackFormatIDRef", "audioChannelFormatIDRef"] {
+                for child in self.children(key, name) {
+                    if name != reference || canonical_id(&self.node(child).text) != format_id {
+                        return Err(Error::xml(format!(
+                            "CHNA 与 AXML 的 {uid} format 引用不一致"
+                        )));
+                    }
+                }
+            }
+            if let Some(pack) = &pack_id {
+                for child in self.children(key, "audioPackFormatIDRef") {
+                    if canonical_id(&self.node(child).text) != *pack {
+                        return Err(Error::xml(format!("CHNA 与 AXML 的 {uid} pack 引用不一致")));
+                    }
+                }
+            }
+            let previous = self.track_uids.get(&key);
+            if previous.is_some_and(|p| {
+                p.format_id != format_id
+                    || p.pack_id
+                        .as_ref()
+                        .zip(pack_id.as_ref())
+                        .is_some_and(|(a, b)| a != b)
+            }) {
+                return Err(Error::xml(format!("CHNA 包含相互矛盾的 {uid} 定义")));
+            }
+            let pack_id = pack_id.or_else(|| previous.and_then(|p| p.pack_id.clone()));
+            self.track_uids.insert(
+                key,
+                TrackUidDefinition {
+                    uid,
+                    format_id,
+                    pack_id,
+                },
+            );
+        }
+        Ok(())
     }
     pub(crate) fn tree(&self, key: u32) -> &Tree {
         if key & COMMON == 0 {
@@ -195,6 +308,21 @@ impl Document {
             .collect()
     }
     pub(crate) fn reference(&self, key: u32, name: &str) -> Option<u32> {
+        if let Some(definition) = self.track_uids.get(&key) {
+            let id = match name {
+                "audioTrackFormatIDRef" if definition.format_id.starts_with("AT_") => {
+                    Some(definition.format_id.as_str())
+                }
+                "audioChannelFormatIDRef" if definition.format_id.starts_with("AC_") => {
+                    Some(definition.format_id.as_str())
+                }
+                "audioPackFormatIDRef" => definition.pack_id.as_deref(),
+                _ => None,
+            };
+            if let Some(id) = id {
+                return self.ids.get(id).copied();
+            }
+        }
         self.refs(key, name).first().copied()
     }
     pub(crate) fn id(&self, key: u32) -> String {
@@ -268,8 +396,11 @@ impl Document {
         self.track_streams = links;
         Ok(())
     }
-    /// Deliberately retains the existing TrackFormat -> StreamFormat chain and pack fallback.
+    /// PCM 可直接引用 channel，其余情况沿 TrackFormat -> StreamFormat 解析。
     pub(crate) fn channel(&self, uid: u32) -> Option<u32> {
+        if let Some(channel) = self.reference(uid, "audioChannelFormatIDRef") {
+            return Some(channel);
+        }
         let tf = self.reference(uid, "audioTrackFormatIDRef")?;
         let sf = *self.track_streams.get(&tf)?;
         self.reference(sf, "audioChannelFormatIDRef")

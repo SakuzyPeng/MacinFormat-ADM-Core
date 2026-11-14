@@ -9,7 +9,7 @@ mod project;
 pub mod records;
 mod xml;
 
-pub use document::Document;
+pub use document::{Document, TrackUidDefinition};
 pub use generate::{GeneratedMetadata, Speaker, generate};
 pub use patch::Patch;
 pub use project::Snapshot;

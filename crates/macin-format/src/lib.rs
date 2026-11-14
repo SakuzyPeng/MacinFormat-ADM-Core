@@ -5,8 +5,8 @@
 #![forbid(unsafe_code)]
 
 use macin_adm::records::{NONE, Span};
-use macin_adm::{Document, Snapshot};
-use macin_bwf::{ChunkReader, Container, Reader, SampleFormat};
+use macin_adm::{Document, Snapshot, TrackUidDefinition};
+use macin_bwf::{Chna, ChunkReader, Container, Reader, SampleFormat};
 use serde::Serialize;
 use std::fmt;
 use std::fs::File;
@@ -159,11 +159,28 @@ fn seconds(samples: u64, rate: u32) -> f64 {
     samples as f64 / f64::from(rate)
 }
 
+fn read_chna(reader: &mut Reader<BufReader<File>>, budget: u64) -> Result<Option<Chna>> {
+    let Some(data) = reader.metadata(*b"chna", budget)? else {
+        return Ok(None);
+    };
+    let chna = Chna::decode_import(&data)?;
+    if !(data.len() - 4).is_multiple_of(40) {
+        return Err(Error::msg("CHNA 记录被截断"));
+    }
+    if chna.tracks != reader.info().format.channels {
+        return Err(Error::msg("CHNA 轨道数与 fmt 不一致"));
+    }
+    if chna.entries.iter().any(|e| e.track_index > chna.tracks) {
+        return Err(Error::msg("CHNA track index 超出轨道数"));
+    }
+    Ok(Some(chna))
+}
+
 /// Audio format, length and the `chna` track table.
 pub fn info(path: &Path) -> Result<InfoReport> {
     let mut reader = Reader::new(open(path)?)?;
     let info = reader.info();
-    let chna = reader.chna()?.map(|chna| {
+    let chna = read_chna(&mut reader, DEFAULT_METADATA_BUDGET)?.map(|chna| {
         chna.entries
             .iter()
             .map(|e| ChnaRow {
@@ -282,18 +299,39 @@ pub fn adm(path: &Path, budget: u64) -> Result<AdmReport> {
     let xml = reader
         .metadata(*b"axml", budget)?
         .ok_or_else(|| Error::msg("no axml chunk"))?;
-    let chna: Vec<(String, u16)> = reader
-        .chna()?
-        .map(|chna| {
-            chna.entries
-                .iter()
-                .map(|e| (fourcc(&e.uid), e.track_index))
-                .collect()
-        })
-        .unwrap_or_default();
+    let chna = read_chna(&mut reader, budget)?;
+    let mut channels = Vec::new();
+    let mut definitions = Vec::new();
+    for entry in chna.iter().flat_map(|c| &c.entries) {
+        if entry.track_index == 0 {
+            continue;
+        }
+        let uid = chna_identifier(&entry.uid)?;
+        let mut format_id = chna_identifier(&entry.track_format)?;
+        if format_id.to_ascii_uppercase().starts_with("AC_")
+            && let Some(id) = format_id.strip_suffix("_00")
+        {
+            format_id = id.to_owned();
+        }
+        let pack = chna_identifier(&entry.pack_format)?;
+        channels.push((uid.clone(), entry.track_index));
+        definitions.push(TrackUidDefinition {
+            uid,
+            format_id,
+            pack_id: (!pack.is_empty()).then_some(pack),
+        });
+    }
     let xml =
         std::str::from_utf8(&xml).map_err(|e| Error::msg(format!("axml is not UTF-8: {e}")))?;
-    adm_from_xml(xml, rate, &chna)
+    let doc = Document::parse_with_track_uids(xml, &definitions)?;
+    let scene = Snapshot::extract(&doc, rate, &channels)?;
+    Ok(summarise(&scene, rate))
+}
+
+fn chna_identifier(bytes: &[u8]) -> Result<String> {
+    std::str::from_utf8(bytes)
+        .map(|s| s.trim_end_matches([' ', '\0']).to_owned())
+        .map_err(|_| Error::msg("CHNA 标识符必须为 UTF-8"))
 }
 
 /// The same summary from an AXML document already in memory.

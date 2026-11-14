@@ -50,6 +50,153 @@ fn mfadm(args: &[&std::ffi::OsStr]) -> std::process::Output {
         .unwrap()
 }
 
+// 独立构造文件，避免写入器只生成紧凑 CHNA 而掩盖导入兼容性问题。
+fn stereo_xml(uids: &str) -> String {
+    format!(
+        r#"<ebuCoreMain><coreMetadata><format><audioFormatExtended>
+<audioProgramme audioProgrammeID="APR_1001" audioProgrammeName="Programme"><audioContentIDRef>ACO_1001</audioContentIDRef></audioProgramme>
+<audioContent audioContentID="ACO_1001" audioContentName="Content"><audioObjectIDRef>AO_1001</audioObjectIDRef></audioContent>
+<audioObject audioObjectID="AO_1001" audioObjectName="Stereo"><audioPackFormatIDRef>AP_00010002</audioPackFormatIDRef><audioTrackUIDRef>ATU_00000001</audioTrackUIDRef><audioTrackUIDRef>ATU_00000002</audioTrackUIDRef></audioObject>
+{uids}</audioFormatExtended></format></coreMetadata></ebuCoreMain>"#
+    )
+}
+
+fn stereo_chna() -> Vec<u8> {
+    let mut chna = vec![2, 0, 2, 0];
+    for index in 1u16..=2 {
+        chna.extend_from_slice(&index.to_le_bytes());
+        chna.extend_from_slice(
+            format!("ATU_{index:08x}AT_0001000{index}_01AP_00010002\0").as_bytes(),
+        );
+    }
+    chna
+}
+
+fn independent_wave(dir: &Path, xml: &str, chna: &[u8]) -> PathBuf {
+    let mut body = b"WAVE".to_vec();
+    let fmt = [1, 0, 2, 0, 0x80, 0xbb, 0, 0, 0, 0xee, 2, 0, 4, 0, 16, 0];
+    for (id, data) in [
+        (b"fmt ", fmt.as_slice()),
+        (b"chna", chna),
+        (b"data", &[0; 4][..]),
+        (b"axml", xml.as_bytes()),
+    ] {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(data);
+        if data.len() % 2 != 0 {
+            body.push(0);
+        }
+    }
+    let mut wave = b"RIFF".to_vec();
+    wave.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+    wave.extend_from_slice(&body);
+    let path = dir.join("independent.wav");
+    std::fs::write(&path, wave).unwrap();
+    path
+}
+
+fn json_report(command: &str, path: &Path) -> serde_json::Value {
+    let output = mfadm(&[command.as_ref(), path.as_os_str(), "--json".as_ref()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn reserved_chna_records_are_ignored_by_info_and_adm() {
+    let dir = Scratch::new();
+    let mut chna = stereo_chna();
+    chna.resize(4 + 32 * 40, 0);
+    let path = independent_wave(
+        &dir.0,
+        &stereo_xml(
+            r#"<audioTrackUID UID="ATU_00000001"><audioTrackFormatIDRef>AT_00010001_01</audioTrackFormatIDRef><audioPackFormatIDRef>AP_00010002</audioPackFormatIDRef></audioTrackUID>
+<audioTrackUID UID="ATU_00000002"><audioTrackFormatIDRef>AT_00010002_01</audioTrackFormatIDRef><audioPackFormatIDRef>AP_00010002</audioPackFormatIDRef></audioTrackUID>"#,
+        ),
+        &chna,
+    );
+    assert_eq!(
+        json_report("info", &path)["chna"].as_array().unwrap().len(),
+        2
+    );
+    let adm = json_report("adm", &path);
+    assert_eq!(adm["direct_speaker_blocks"], 2);
+    assert_eq!(adm["objects"][0]["kind"], "DirectSpeakers");
+}
+
+#[test]
+fn chna_provides_missing_track_uid_definitions_and_format_references() {
+    let dir = Scratch::new();
+    for uids in [
+        "",
+        r#"<audioTrackUID UID="ATU_00000001"/><audioTrackUID UID="ATU_00000002"/>"#,
+    ] {
+        for direct in [false, true] {
+            let mut chna = stereo_chna();
+            if direct {
+                for (index, record) in chna[4..].as_chunks_mut::<40>().0.iter_mut().enumerate() {
+                    record[14..28]
+                        .copy_from_slice(format!("AC_0001000{}_00", index + 1).as_bytes());
+                }
+            }
+            let xml = stereo_xml(uids);
+            let path = independent_wave(&dir.0, &xml, &chna);
+            let adm = json_report("adm", &path);
+            assert_eq!(adm["objects"][0]["kind"], "DirectSpeakers");
+            assert_eq!(adm["direct_speaker_blocks"], 2);
+            assert_eq!(adm["objects"][0]["tracks"][0]["track_index"], 1);
+            assert_eq!(adm["objects"][0]["tracks"][1]["track_index"], 2);
+            assert_eq!(adm["warnings"], serde_json::json!([]));
+            let output = mfadm(&["axml".as_ref(), path.as_os_str()]);
+            assert!(output.status.success());
+            assert_eq!(output.stdout, xml.as_bytes());
+        }
+    }
+}
+
+#[test]
+fn inconsistent_chna_and_axml_references_are_errors() {
+    let dir = Scratch::new();
+    for reference in [
+        "<audioTrackFormatIDRef>AT_00010002_01</audioTrackFormatIDRef>",
+        "<audioChannelFormatIDRef>AC_00010001</audioChannelFormatIDRef>",
+        "<audioPackFormatIDRef>AP_00010003</audioPackFormatIDRef>",
+    ] {
+        let xml = stereo_xml(&format!(
+            r#"<audioTrackUID UID="ATU_00000001">{reference}</audioTrackUID><audioTrackUID UID="ATU_00000002"/>"#
+        ));
+        let path = independent_wave(&dir.0, &xml, &stereo_chna());
+        let output = mfadm(&["adm".as_ref(), path.as_os_str(), "--json".as_ref()]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("CHNA") && error.contains("AXML"), "{error}");
+    }
+}
+
+#[test]
+fn importing_reserved_chna_retains_track_validation_and_metadata_budget() {
+    let dir = Scratch::new();
+    let mut chna = stereo_chna();
+    chna.resize(4 + 32 * 40, 0);
+    let path = independent_wave(&dir.0, &stereo_xml(""), &chna);
+    let error = macin_format::adm(&path, 1024).unwrap_err();
+    assert!(error.message.contains("预算"), "{error}");
+    for (offset, value) in [(0, 1u16), (4, 3u16)] {
+        let mut invalid = chna.clone();
+        invalid[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        let path = independent_wave(&dir.0, &stereo_xml(""), &invalid);
+        for command in ["info", "adm"] {
+            let output = mfadm(&[command.as_ref(), path.as_os_str()]);
+            assert_eq!(output.status.code(), Some(1));
+        }
+    }
+}
+
 #[test]
 fn chunks_follow_the_adm_layout() {
     let dir = Scratch::new();
