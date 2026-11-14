@@ -4,8 +4,8 @@
 
 ## 新库
 
-- macOS arm64：fmt、Clippy（所有 target、警告视为错误）、49 项测试通过；1 项实际写入超过 4 GiB 的历史测试保持 ignored。新增虚拟输出测试覆盖该边界而不占用巨型磁盘文件。
-- Windows x64 / Rust MSVC 1.98：49 项通过、同一历史测试 ignored；采用代码提交 bf3fdca597efef6f9baec5d0adfee317fcb53d76。首次 checkout 的换行转换已按 .gitattributes 的 LF 策略刷新，资源哈希与锁定清单一致。
+- macOS arm64：fmt、Clippy（所有 target、警告视为错误）、50 项测试通过；1 项实际写入超过 4 GiB 的历史测试保持 ignored。新增虚拟输出测试覆盖该边界而不占用巨型磁盘文件。
+- Windows x64 / Rust MSVC 1.98：50 项通过、同一历史测试 ignored；采用代码提交 2fceb9dd3fc2d163ab1290a07f5be58fae233382。首次 checkout 的换行转换已按 .gitattributes 的 LF 策略刷新，资源哈希与锁定清单一致。
 - 覆盖独立 XML/WAVE 输入、未知扩展回写、四种配置与两种采样率、分块不变性、独立 ramp、局部耳机更新、量化端点、微小 gain、原子失败和超大尺寸。
 
 ## 外部互操作
@@ -33,4 +33,4 @@ Standard 必须通过独立 EAR 验证，3DoF 必须通过 atmos_info，Logic/ho
 私有阶段消费方仅在迁移分支依赖固定 Git 提交。公开发布线与原 crates.io 发布检查保留。
 
 - DAMF 局部耳机事件：已有独立检查器以新库生成的 home 包为输入，home/3DoF 验证通过；官方工具原生 DAMF 往返保持连续字段命令与耳机事件时间线。ADM 转换不作为 ramp 保真判据。
-- GitHub Actions 的 macOS/Windows 矩阵在代码提交 bf3fdca597efef6f9baec5d0adfee317fcb53d76 上通过；run 43612603716。
+- GitHub Actions 的 macOS/Windows 矩阵在代码提交 2fceb9dd3fc2d163ab1290a07f5be58fae233382 上通过；run 43614066686。
