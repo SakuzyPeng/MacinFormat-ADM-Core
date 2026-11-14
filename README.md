@@ -5,7 +5,7 @@
 **ADM/BWF 读写与 Atmos 母版写入的 Rust 基础库** · Rust 2024 · MSRV 1.98 · MIT
 
 一个**只管文件格式**的 Rust 库：解析、投影和回写 ADM XML，读写 RIFF/RF64/BW64 容器，并把对象音频流式写成
-ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象聚类和编码工具原本各写一份的格式代码集中到一处；
+ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 读回同一个模型、转换到其他配置。它把渲染、解码导出、对象聚类和编码工具原本各写一份的格式代码集中到一处；
 场景模型和算法仍由各消费方自己负责。
 
 > 它不是渲染器、解码器或编码器：不含任何音频算法，不导出 C ABI，也不依赖 AC-4、聚类实现或规范派生表。
@@ -20,6 +20,7 @@ ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象�
 - [命令行工具 mfadm](#命令行工具-mfadm)
 - [母版写入规则](#母版写入规则)
 - [四种母版配置](#四种母版配置)
+- [DAMF 读取与转换](#damf-读取与转换)
 - [语义损失与诊断](#语义损失与诊断)
 - [不做什么](#不做什么)
 - [开发与验收](#开发与验收)
@@ -36,9 +37,12 @@ ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象�
 - **生成 ADM**：为 DirectSpeakers、HOA3 和 Binaural 渲染结果生成 AXML 与配套 `chna`。
 - **读写 WAVE 容器**：RIFF / RF64 / BW64 的流式读写、按帧跳转、`chna` / `bext` 等 chunk 的读取与编辑，
   元数据按调用方给定的预算读取，打开文件时不分配未知 chunk。
-- **命令行检查**：`mfadm` 列出 chunk、音频格式、`chna` 和 ADM 摘要，可输出 JSON。
 - **写 Atmos 母版**：固定 7.1.2 bed 加最多 118 个对象，分块写入 PCM 和对象元数据更新，
   输出 Standard BW64、Logic RF64、DAMF home 或 DAMF 3DoF，完成后原子提交。
+- **一次写出多份**：`MultiWriter` 把同一个模型在一次写入里同时输出成 ADM 和 DAMF 等多种配置。
+- **读 DAMF、转换配置**：`damf::DamfReader` 把 DAMF 读回写入用的模型，转成任意配置；音频也可以换成一个 WAV，
+  即“WAV 加 DAMF 元数据”写母版。
+- **命令行**：`mfadm` 列出 chunk、音频格式、`chna` 和 ADM 摘要，并能做 DAMF 转换，可输出 JSON。
 
 ## 三个 crate
 
@@ -46,11 +50,13 @@ ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象�
 | --- | --- | --- |
 | `macin-adm` | `Document`、`Snapshot`、`Patch`、`generate` | ADM XML、引用解析、Objects/DirectSpeakers/HOA 投影、生成与保留原文的回写 |
 | `macin-bwf` | `Reader`、`ChunkReader`、`Writer`、`Chna` | RIFF/RF64/BW64、PCM 与容器编辑；不解释 ADM XML |
-| `macin-atmos` | `MasterSpec`、`MasterWriter` | 来源无关的 ADM BWF / DAMF 母版写入；依赖前两者 |
+| `macin-atmos` | `MasterSpec`、`MasterWriter`、`MultiWriter`；`damf::DamfReader`（`read` feature） | 来源无关的 ADM BWF / DAMF 母版写入，以及 DAMF 读取与转换；依赖前两者 |
 
 三者都禁止 unsafe（`unsafe_code = "forbid"`），依赖只有 `quick-xml`、`libm` 和 `renamore`，版本全部锁定。
+DAMF 读取需要 YAML 解析，放在默认关闭的 `read` feature 后面，只有打开它才会引入 `saphyr-parser`（同样锁定版本）；
+只写母版的消费方依赖图不变。
 
-另有不发布的 `macin-format`，提供只读检查命令 [`mfadm`](#命令行工具-mfadm)；它额外依赖 `clap` 和 `serde_json`，
+另有不发布的 `macin-format`，提供命令行工具 [`mfadm`](#命令行工具-mfadm)；它额外依赖 `clap` 和 `serde_json`，
 这些依赖不会进入三个库。
 
 ## 获取
@@ -63,6 +69,12 @@ macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev 
 # 只需要读写 ADM 或容器时，按需引入：
 macin-adm = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
 macin-bwf = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+```
+
+需要读 DAMF 或做转换时打开 `read`：
+
+```toml
+macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>", features = ["read"] }
 ```
 
 三个 crate 已准备 `0.1.0` 的包元数据，**尚未上传 crates.io**；上传步骤见
@@ -132,9 +144,53 @@ cargo run -p macin-atmos --example synthetic_master -- result.wav standard 96000
 
 第二个参数可选 `standard` / `logic` / `home` / `3dof`，第三个可选 `48000` / `96000`。
 
+### 同时写 ADM 和 DAMF
+
+```rust
+use macin_atmos::*;
+
+fn both() -> Result<()> {
+    let spec = MasterSpec {
+        objects: vec![ObjectSpec::new(TrackId(42), "Cluster 0")],
+        ..Default::default()
+    };
+    let targets = [
+        Target { path: "result.wav".into(), profile: Profile::Logic },
+        Target { path: "result-damf".into(), profile: Profile::DamfHome },
+    ];
+    // 同一份模型、同一次写入；PCM 只量化一次，两份输出要么都提交，要么都不提交。
+    let mut master = MultiWriter::create(&spec, &targets)?;
+    let pcm = vec![0.0f32; 512 * 11];
+    master.write_block(PcmBlock::F32Interleaved(&pcm), &[])?;
+    let reports = master.finish()?; // 每个 target 一份 WriteReport
+    assert_eq!(reports.len(), 2);
+    Ok(())
+}
+```
+
+### 把 DAMF 转成 ADM
+
+```rust
+use macin_atmos::damf::DamfReader;
+use macin_atmos::{LossPolicy, Profile, Result, Target};
+
+fn convert() -> Result<()> {
+    // 读取时按同一个 LossPolicy 检查模型装不下的内容。
+    let reader = DamfReader::open("result-damf/master.atmos", LossPolicy::Allow)?;
+    let targets = [Target { path: "from-damf.wav".into(), profile: Profile::Standard }];
+    // 换成 reader.wave_audio("mix.wav")? 就是“WAV 加 DAMF 元数据”。
+    let conversion = reader.convert(reader.audio()?, &targets)?;
+    for loss in conversion.read.iter().chain(&conversion.outputs[0].diagnostics) {
+        eprintln!("{:?} {}: {}", loss.track, loss.field, loss.message);
+    }
+    Ok(())
+}
+```
+
 ## 命令行工具 mfadm
 
-`mfadm` 只读不写，用来查看一个 RIFF/RF64/BW64 文件里有什么。安装到 `~/.cargo/bin`：
+`mfadm` 用来查看一个 RIFF/RF64/BW64 文件里有什么，以及转换 DAMF。它从不修改输入，也不覆盖已存在的输出。
+安装到 `~/.cargo/bin`：
 
 ```sh
 cargo install --locked --path crates/macin-format
@@ -146,8 +202,9 @@ cargo install --locked --path crates/macin-format
 | `mfadm info <file>` | 采样率、声道数、位深、帧数与时长，`chna` 里的轨道对应关系 |
 | `mfadm adm <file>` | 按文件自身的 `chna` 和采样率解析 ADM，汇总 programme、content、object、轨道与 block，列出被跳过的 `typeDefinition` |
 | `mfadm axml <file>` | 把 `axml` chunk 原样写到 stdout，方便和外部工具的结果做对比 |
+| `mfadm convert <x.atmos> --to PROFILE=PATH …` | 把 DAMF 一次写成一种或多种配置；`--audio <wav>` 改用 WAV 作音频，`--allow-loss` 允许降级并列出损失 |
 
-`chunks`、`info`、`adm` 加 `--json` 输出机器可读的 JSON，供脚本使用。`adm` 和 `axml` 读元数据时有预算，
+`chunks`、`info`、`adm`、`convert` 加 `--json` 输出机器可读的 JSON，供脚本使用。`adm` 和 `axml` 读元数据时有预算，
 默认 256 MiB，可用 `--max-metadata <MiB>` 调整。出错时退出码为 1，参数错误为 2。
 
 ```text
@@ -157,6 +214,15 @@ $ mfadm adm result.wav
 object AO_100b "Moving object"  Objects
   start 0:00:00.000, duration 0:00:02.000, gain 1
   ATU_0000000b -> track 11, 3 object blocks
+```
+
+```text
+$ mfadm convert film/master.atmos --to standard=film.wav --to 3dof=film-3dof --allow-loss
+film/master.atmos (home): 2 objects, 3 updates
+-> film.wav (standard): 96000 frames, 12 channels, 48000 Hz
+   lost head_tracking (track 10, sample 36000): Property has no exact mapping in this ADM profile
+   lost binaural_mode (track 10, sample 36000): Property has no exact mapping in this ADM profile
+-> film-3dof (3dof): 96000 frames, 12 channels, 48000 Hz
 ```
 
 ## 母版写入规则
@@ -187,6 +253,15 @@ object AO_100b "Moving object"  Objects
 - 低层 `metadata` / `containers` 入口供已完成语义映射的批量适配器使用；自动能力检查、诊断与提交事务由
   `MasterWriter` 提供。
 
+**一次写出多份（`MultiWriter`）**
+
+- 所有 target 共用一个 `MasterSpec`，只有配置不同；PCM 只量化一次，各份输出的音频完全相同。
+  每份输出与单独用 `MasterWriter` 写出的结果逐字节一致。
+- 更新先在每个 target 上校验和映射，全部通过才提交。某个 target 拒绝（例如 `Reject` 下 ADM 不能表达耳机策略）时，
+  所有 target 都保持原样，可以改正后重试，和单个 writer 的行为一致。
+- `finish` 依次发布各份输出；其中一份发布失败时，把已发布的移回暂存区再报错，不留下半套结果。
+  这个回滚挡不住进程在两次 rename 之间崩溃：那种情况下可能只留下一部分输出。
+
 ## 四种母版配置
 
 | 配置 | 容器与时钟 | 已验证的专属能力 |
@@ -198,6 +273,27 @@ object AO_100b "Moving object"  Objects
 
 `interpolationLength` 保留九位来源精度，不随 Logic 时钟降低。ADM 文件的 `ds64` 固定为首 chunk，
 `chna` 在音频之前，流式 AXML 在音频之后；依据 ITU-R BS.2088-2 Annex 1 §2.1、§4、§5。
+
+## DAMF 读取与转换
+
+需要 `read` feature。`DamfReader::open` 读入 `.atmos` 清单，得到和写入时相同的 `MasterSpec`，
+再由 `updates()` 逐条给出 `ObjectUpdate`；`convert` 经 `MultiWriter` 写成任意组合的配置。转换就是普通的写入，
+所以上面每种配置的损失检查照常生效，读取时模型装不下的内容也按同一个 `LossPolicy` 处理。
+
+- **内存有界**：元数据文件扫描两遍、从不整体载入。第一遍校验整条时间线，并把每个对象开头位于第 0 个采样、
+  不带 ramp 的事件折叠成初始状态；第二遍按文件顺序给出其余更新。实测 118 个对象、70.8 万个事件、一次写出三份
+  （约 1.1–1.4 GB 一份）时峰值内存 12 MiB。
+- **ID 与声道**：DAMF 的 ID 就是音频声道号。bed 按 L、R、C、LFE、Lss、Rss、Lrs、Rrs、Lts、Rts 重新排列，
+  对象按 ID 升序排在后面，读回的 `TrackId` 等于 DAMF ID。没有 bed 的 DAMF 会写出一组静音 bed。
+- **WAV 作音频**：`wave_audio` 用 WAV 代替 `.atmos.audio`，第 n 个声道对应 DAMF ID n，采样率必须与元数据一致。
+  16/24-bit PCM 精确转换；32-bit PCM 和浮点按已声明的格式行为量化到 24 bit，超出 ±1 的浮点样本报错。
+- **按损失处理**（`Reject` 报错并指明字段，`Allow` 丢弃并记入诊断）：bed 声道上固定 bed 无法再现的值（`bed_*`）、
+  未知字段（`unknown_field`）、没有连续属性却带非零 `rampLength` 的事件（`ramp`）、没有第 0 个采样处事件的对象
+  （`initial_state`），以及与写入侧固定值不同的 `simplified`、`offset`、`scBedConfiguration`、`downmixType_5to2`、
+  `51-to-20_LsRs90degPhaseShift` 和自定义 `trimMode`。
+- **直接拒绝**：多个 presentation、多个 bed、不是完整 7.1.2 的 bed、0.5/0.6 以外的 DAMF 版本、
+  YAML 锚点/别名/标签和多文档、非 S24LE 的 CAF、时间倒退或引用未声明 ID 的事件、元数据超出音频长度。
+- 转换写入的是本库自己的创建工具字段；源文件的 `creationTool` 可通过 `creation_tool()` 查看，不会被冒用。
 
 ## 语义损失与诊断
 
@@ -212,9 +308,10 @@ object AO_100b "Moving object"  Objects
 
 ## 不做什么
 
-- 不做 DAMF **读取**、多 bed 制作、重采样、渲染或编码算法（首版）。
+- 不做多 bed 制作、重采样、渲染或编码算法（首版）。
+- 还不能把 ADM 读成母版模型，因此暂不支持 ADM 转 DAMF；DAMF 转 ADM、DAMF 配置互转已支持。
 - 不做渲染、聚类或编解码；不导出 C ABI。
-- `mfadm` 不修改、不转换文件：格式转换会在没有提示的情况下丢语义，和 `LossPolicy::Reject` 的思路相冲突。
+- `mfadm` 不修改输入、不覆盖输出；转换的损失与写入一样按 `LossPolicy` 处理，默认拒绝。
 - 不在文件里伪造创建工具来源：即使某个外部检查器因此拒绝，也保留真实创建者（见下文）。
 
 ## 开发与验收
@@ -223,13 +320,17 @@ object AO_100b "Moving object"  Objects
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
+# workspace 构建会经由 macin-format 打开 read，因此单独检查只写母版的配置：
+cargo clippy --locked -p macin-atmos --all-targets -- -D warnings
+cargo test --locked -p macin-atmos
 ```
 
 `rust-toolchain.toml` 锁定 Rust 1.98。可以通过 `CARGO_TARGET_DIR` 或被忽略的 `.cargo/config.toml`
 复用已有构建目录；不要复制消费方的 target 或媒体。
 
 测试使用独立的 XML/WAVE 夹具，覆盖分块一致性、ramp、四种配置与两种采样率、原子失败，以及不创建巨型文件的
-虚拟 4 GiB 边界检查。原生验证平台为 macOS arm64 与 Windows x64，CI 在这两个平台上跑同一套检查。
+虚拟 4 GiB 边界检查。DAMF 读取的测试要求 DAMF 转 DAMF 三个成员逐字节复原、DAMF 转 ADM 与直接写 ADM 逐字节一致，
+并覆盖手写的第三方 YAML 写法、声道重排、WAV 代替音频、各类损失与拒绝。原生验证平台为 macOS arm64 与 Windows x64，CI 在这两个平台上跑同一套检查。
 
 ## 外部工具互操作
 

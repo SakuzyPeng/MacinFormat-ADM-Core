@@ -345,6 +345,12 @@ impl MasterWriter {
     /// must be nondecreasing, and events cannot precede already submitted audio.
     pub fn schedule_updates(&mut self, updates: &[ObjectUpdate]) -> Result<()> {
         self.ready()?;
+        let prepared = self.prepare(updates)?;
+        self.commit(prepared)
+    }
+    /// Validate and map updates without touching any spool, so a rejection leaves the writer
+    /// exactly as it was. `MultiWriter` prepares on every target before committing to any.
+    fn prepare(&self, updates: &[ObjectUpdate]) -> Result<Prepared> {
         let mut states: Vec<_> = self.tracks.iter().map(|t| t.timeline.clone()).collect();
         let mut diagnostics = self.diagnostics.clone();
         let mut prepared = Vec::with_capacity(updates.len());
@@ -414,8 +420,14 @@ impl MasterWriter {
             previous.update(mapped_event, state);
             prepared.push((index, mapped_event, state));
         }
-        // No validation errors after this point; an I/O failure poisons the whole transaction.
-        for (index, event, state) in prepared {
+        Ok(Prepared {
+            events: prepared,
+            diagnostics,
+        })
+    }
+    /// No validation errors after this point; an I/O failure poisons the whole transaction.
+    fn commit(&mut self, prepared: Prepared) -> Result<()> {
+        for (index, event, state) in prepared.events {
             let track = &mut self.tracks[index];
             let result = if self.spec.profile.is_adm() {
                 track
@@ -436,14 +448,27 @@ impl MasterWriter {
             }
             track.timeline.update(event, state);
         }
-        self.diagnostics = diagnostics;
+        self.diagnostics = prepared.diagnostics;
         Ok(())
     }
 
     pub fn write_block(&mut self, pcm: PcmBlock<'_>, updates: &[ObjectUpdate]) -> Result<()> {
         self.ready()?;
+        let frames = validate_pcm(pcm, self.spec.channels())?;
+        let end = self.block_end(frames, updates)?;
+        let prepared = self.prepare(updates)?;
+        self.commit(prepared)?;
+        let result = self.write_audio(pcm, frames);
+        if let Err(error) = result {
+            self.failed = true;
+            return Err(error);
+        }
+        self.frames = end;
+        Ok(())
+    }
+    /// Timeline checks for a block of `frames` already validated PCM frames.
+    fn block_end(&self, frames: usize, updates: &[ObjectUpdate]) -> Result<u64> {
         let channels = self.spec.channels();
-        let frames = validate_pcm(pcm, channels)?;
         if frames == 0 && !updates.is_empty() {
             return Err(Error::invalid("Metadata requires a nonempty audio block"));
         }
@@ -463,14 +488,7 @@ impl MasterWriter {
                 "Block updates must be within the audio block",
             ));
         }
-        self.schedule_updates(updates)?;
-        let result = self.write_audio(pcm, frames);
-        if let Err(error) = result {
-            self.failed = true;
-            return Err(error);
-        }
-        self.frames = end;
-        Ok(())
+        Ok(end)
     }
     fn write_audio(&mut self, pcm: PcmBlock<'_>, frames: usize) -> Result<()> {
         let audio = self
@@ -480,31 +498,24 @@ impl MasterWriter {
         if let PcmBlock::S24Le(data) = pcm {
             return audio.write(data);
         }
-        let channels = self.spec.channels();
-        let mut scratch = Vec::with_capacity(channels * 3 * 1024);
-        for first in (0..frames).step_by(1024) {
-            scratch.clear();
-            for frame in first..frames.min(first + 1024) {
-                for channel in 0..channels {
-                    let value = match pcm {
-                        PcmBlock::F32Interleaved(v) => v[frame * channels + channel],
-                        PcmBlock::F32Planar(v) => v[channel][frame],
-                        PcmBlock::S24Le(_) => unreachable!(),
-                    };
-                    // Signed 24-bit full-scale, nearest with ties away from zero. +1 saturates to
-                    // the positive endpoint; -1 uses the exact negative endpoint. No dither.
-                    let value = (f64::from(value) * 8_388_608.)
-                        .round()
-                        .clamp(-8_388_608., 8_388_607.) as i32;
-                    scratch.extend_from_slice(&value.to_le_bytes()[..3]);
-                }
-            }
+        let mut scratch = Vec::new();
+        for first in (0..frames).step_by(QUANTUM) {
+            quantize(
+                pcm,
+                self.spec.channels(),
+                first..frames.min(first + QUANTUM),
+                &mut scratch,
+            );
             audio.write(&scratch)?;
         }
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<WriteReport> {
+    pub fn finish(self) -> Result<WriteReport> {
+        self.stage()?.publish()
+    }
+    /// Complete every member in the staging directory; nothing is visible at the output yet.
+    fn stage(mut self) -> Result<Staged> {
         self.ready()?;
         if self.frames == 0 {
             return Err(Error::invalid("Empty master"));
@@ -630,7 +641,6 @@ impl MasterWriter {
         } else {
             self.temp.clone()
         };
-        renamore::rename_exclusive(&source, &self.output)?;
         let objects = self
             .spec
             .objects
@@ -642,7 +652,7 @@ impl MasterWriter {
                 audio_object_id: metadata::object_id((11 + i) as u16),
             })
             .collect();
-        Ok(WriteReport {
+        let report = WriteReport {
             frames: self.frames,
             channels: self.spec.channels() as u16,
             sample_rate: self.spec.sample_rate,
@@ -651,11 +661,230 @@ impl MasterWriter {
             dbmd_bytes,
             objects,
             diagnostics: std::mem::take(&mut self.diagnostics),
+        };
+        Ok(Staged {
+            source,
+            report,
+            writer: self,
         })
     }
 }
 
-fn validate_pcm(pcm: PcmBlock<'_>, channels: usize) -> Result<usize> {
+/// A finished master still inside its staging directory. Dropping it discards the master.
+struct Staged {
+    writer: MasterWriter,
+    source: PathBuf,
+    report: WriteReport,
+}
+impl Staged {
+    fn publish(self) -> Result<WriteReport> {
+        renamore::rename_exclusive(&self.source, &self.writer.output)?;
+        Ok(self.report)
+    }
+    /// Move a published output back into staging so dropping the writer removes it.
+    fn unpublish(&self) -> std::io::Result<()> {
+        fs::rename(&self.writer.output, &self.source)
+    }
+}
+
+struct Prepared {
+    events: Vec<(usize, ObjectUpdate, ObjectState)>,
+    diagnostics: Vec<MappingDiagnostic>,
+}
+
+const QUANTUM: usize = 1024;
+
+/// Signed 24-bit full-scale, nearest with ties away from zero. +1 saturates to the positive
+/// endpoint; -1 uses the exact negative endpoint. No dither. `pcm` must already be validated.
+pub(crate) fn quantize(
+    pcm: PcmBlock<'_>,
+    channels: usize,
+    frames: std::ops::Range<usize>,
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    for frame in frames {
+        for channel in 0..channels {
+            let value = match pcm {
+                PcmBlock::F32Interleaved(v) => v[frame * channels + channel],
+                PcmBlock::F32Planar(v) => v[channel][frame],
+                PcmBlock::S24Le(_) => unreachable!("S24LE is written as is"),
+            };
+            let value = (f64::from(value) * 8_388_608.)
+                .round()
+                .clamp(-8_388_608., 8_388_607.) as i32;
+            out.extend_from_slice(&value.to_le_bytes()[..3]);
+        }
+    }
+}
+
+/// Where one `MultiWriter` output goes and which profile it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub path: PathBuf,
+    pub profile: Profile,
+}
+
+/// Writes one model to several outputs in a single pass: ADM and DAMF side by side, for example.
+///
+/// Every target gets the same spec except for its profile, so the PCM is quantised once and the
+/// outputs carry identical audio. Updates are validated and mapped on every target before any
+/// target commits them: a rejection (an ADM loss under `LossPolicy::Reject`, say) leaves all
+/// targets unchanged, as it would a single writer. `finish` publishes all outputs or, if one
+/// publish fails, moves the already published ones back and returns the error. That rollback
+/// does not survive a crash between renames: a process killed there can leave part of the set.
+#[derive(Debug)]
+pub struct MultiWriter {
+    writers: Vec<MasterWriter>,
+    scratch: Vec<u8>,
+}
+impl MultiWriter {
+    pub fn create(spec: &MasterSpec, targets: &[Target]) -> Result<Self> {
+        if targets.is_empty() {
+            return Err(Error::invalid("MultiWriter needs at least one target"));
+        }
+        for (i, target) in targets.iter().enumerate() {
+            if targets[..i].iter().any(|t| t.path == target.path) {
+                return Err(Error::invalid("MultiWriter targets must not share a path"));
+            }
+        }
+        let writers = targets
+            .iter()
+            .map(|target| {
+                MasterWriter::create(
+                    &target.path,
+                    MasterSpec {
+                        profile: target.profile,
+                        ..spec.clone()
+                    },
+                )
+                .map_err(|mut e| {
+                    e.message = format!("{}: {}", target.path.display(), e.message);
+                    e
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            writers,
+            scratch: Vec::new(),
+        })
+    }
+    pub fn frames_written(&self) -> u64 {
+        self.writers[0].frames
+    }
+    /// The shared spec, with the first target's profile.
+    pub fn spec(&self) -> &MasterSpec {
+        &self.writers[0].spec
+    }
+    fn ready(&self) -> Result<()> {
+        self.writers.iter().try_for_each(MasterWriter::ready)
+    }
+    fn poison(&mut self) {
+        for writer in &mut self.writers {
+            writer.failed = true;
+        }
+    }
+    fn prepare(&self, updates: &[ObjectUpdate]) -> Result<Vec<Prepared>> {
+        self.writers.iter().map(|w| w.prepare(updates)).collect()
+    }
+    fn commit(&mut self, prepared: Vec<Prepared>) -> Result<()> {
+        for (writer, prepared) in self.writers.iter_mut().zip(prepared) {
+            if let Err(error) = writer.commit(prepared) {
+                self.poison();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    pub fn schedule_updates(&mut self, updates: &[ObjectUpdate]) -> Result<()> {
+        self.ready()?;
+        let prepared = self.prepare(updates)?;
+        self.commit(prepared)
+    }
+    pub fn write_block(&mut self, pcm: PcmBlock<'_>, updates: &[ObjectUpdate]) -> Result<()> {
+        self.ready()?;
+        let channels = self.writers[0].spec.channels();
+        let frames = validate_pcm(pcm, channels)?;
+        let ends = self
+            .writers
+            .iter()
+            .map(|w| w.block_end(frames, updates))
+            .collect::<Result<Vec<_>>>()?;
+        let prepared = self.prepare(updates)?;
+        self.commit(prepared)?;
+        if let Err(error) = self.write_audio(pcm, frames, channels) {
+            self.poison();
+            return Err(error);
+        }
+        for (writer, end) in self.writers.iter_mut().zip(ends) {
+            writer.frames = end;
+        }
+        Ok(())
+    }
+    fn write_audio(&mut self, pcm: PcmBlock<'_>, frames: usize, channels: usize) -> Result<()> {
+        let write = |bytes: &[u8], writers: &mut [MasterWriter]| -> Result<()> {
+            for writer in writers {
+                writer
+                    .audio
+                    .as_mut()
+                    .ok_or_else(|| Error::new(ErrorKind::Failed, "Audio writer closed"))?
+                    .write(bytes)?;
+            }
+            Ok(())
+        };
+        if let PcmBlock::S24Le(data) = pcm {
+            return write(data, &mut self.writers);
+        }
+        for first in (0..frames).step_by(QUANTUM) {
+            quantize(
+                pcm,
+                channels,
+                first..frames.min(first + QUANTUM),
+                &mut self.scratch,
+            );
+            write(&self.scratch, &mut self.writers)?;
+        }
+        Ok(())
+    }
+    /// Reports in target order. On error no output of this writer remains published.
+    pub fn finish(self) -> Result<Vec<WriteReport>> {
+        let staged = self
+            .writers
+            .into_iter()
+            .map(MasterWriter::stage)
+            .collect::<Result<Vec<_>>>()?;
+        let mut published = 0;
+        let mut failure = None;
+        for (i, item) in staged.iter().enumerate() {
+            if let Err(error) = renamore::rename_exclusive(&item.source, &item.writer.output) {
+                failure = Some((i, error));
+                break;
+            }
+            published += 1;
+        }
+        let Some((index, error)) = failure else {
+            return Ok(staged.into_iter().map(|s| s.report).collect());
+        };
+        let mut error = Error::from(error);
+        for item in &staged[..published] {
+            if let Err(rollback) = item.unpublish() {
+                error.message = format!(
+                    "{}; rollback of {} also failed: {rollback}",
+                    error.message,
+                    item.writer.output.display()
+                );
+            }
+        }
+        error.message = format!(
+            "Publishing {} failed: {}",
+            staged[index].writer.output.display(),
+            error.message
+        );
+        Err(error)
+    }
+}
+
+pub(crate) fn validate_pcm(pcm: PcmBlock<'_>, channels: usize) -> Result<usize> {
     let valid = |v: f32| v.is_finite() && (-1.0..=1.0).contains(&v);
     match pcm {
         PcmBlock::S24Le(v) => {

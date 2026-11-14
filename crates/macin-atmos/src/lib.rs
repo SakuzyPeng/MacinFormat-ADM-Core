@@ -8,5 +8,9 @@ mod model;
 mod writer;
 pub use error::{Error, ErrorKind, Result};
 pub use model::*;
-pub use writer::MasterWriter;
+pub use writer::{MasterWriter, MultiWriter, Target};
 pub mod containers;
+#[cfg(feature = "read")]
+pub mod damf;
+#[cfg(feature = "read")]
+mod yaml;

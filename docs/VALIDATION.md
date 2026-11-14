@@ -8,6 +8,19 @@
 - Windows x64 / Rust MSVC 1.98：50 项通过、同一历史测试 ignored；采用代码提交 2fceb9dd3fc2d163ab1290a07f5be58fae233382。首次 checkout 的换行转换已按 .gitattributes 的 LF 策略刷新，资源哈希与锁定清单一致。
 - 覆盖独立 XML/WAVE 输入、未知扩展回写、四种配置与两种采样率、分块不变性、独立 ramp、局部耳机更新、量化端点、微小 gain、原子失败和超大尺寸。
 
+## DAMF 读取、转换与多份输出
+
+日期：2026-11-14，Linux x64 / Rust 1.98；macOS arm64 与 Windows x64 待 CI。
+
+- workspace（`macin-atmos` 经 `macin-format` 打开 `read`）：fmt、Clippy（所有 target、警告视为错误）、82 项测试通过，1 项历史 4 GiB 测试保持 ignored。
+- 不开 `read` 的 `macin-atmos`：Clippy 与 17 项测试通过；依赖图与改动前相同，不含 `saphyr-parser`。CI 增加了这一配置的独立步骤。
+- `MultiWriter`：一次写出四种配置，每份与单独写出的结果逐字节一致；某个 target 在 `Reject` 下拒绝更新时所有 target 保持不变、可重试；发布中途失败时已发布的输出被撤回，不留暂存目录。
+- DAMF 读取：home 与 3dof 转回同一配置时 `.atmos`、`.atmos.metadata`、`.atmos.audio` 三个成员逐字节复原；转 Standard/Logic/3dof 时与直接用同一模型写出的结果逐字节一致，损失诊断也相同。
+- 手写的第三方写法：注释、flow/block 混用、引号风格、键顺序、bed ID 打乱、对象 ID 不连续、事件按时间交错、`sampleRate` 在 `events` 之后、`-.inf` 增益、`size3D`、缺省的 `rampLength`；按声道标记值核对了输出的声道顺序。
+- WAV 代替音频：24-bit WAV 与原 CAF 转换结果逐字节一致；声道不足时报错并指明缺失的 DAMF ID。
+- 规模：118 个对象、70.8 万个事件、60 秒 48 kHz 的 DAMF，一次转成 Standard、Logic、3dof 三份（约 1.1–1.4 GB 一份），release 构建 23 秒，峰值内存 12 MiB。
+- 尚未进行：用 Dolby Conversion Tool 产出的 DAMF 作为第三方输入做读回验证。上面的第三方写法是手写的，不能替代真实工具的输出。
+
 ## 外部互操作
 
 Dolby Atmos Conversion Tool 2.1.2_07765940、DME 随附 atmos_info、EBU EAR 2.1.0 与 mradm Release。

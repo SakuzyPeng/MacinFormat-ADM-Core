@@ -40,3 +40,11 @@ jobs:
 
       - name: Test workspace
         run: cargo test --locked --workspace
+
+      # The workspace build unifies macin-atmos/read on through macin-format, so the writer-only
+      # configuration downstream crates depend on is checked on its own.
+      - name: Lint macin-atmos without read
+        run: cargo clippy --locked -p macin-atmos --all-targets -- -D warnings
+
+      - name: Test macin-atmos without read
+        run: cargo test --locked -p macin-atmos

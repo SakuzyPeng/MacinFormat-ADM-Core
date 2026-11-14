@@ -1,7 +1,9 @@
-//! `mfadm`: read-only inspection of RIFF/RF64/BW64 files and their ADM metadata.
+//! `mfadm`: inspection of RIFF/RF64/BW64 files and their ADM metadata, and DAMF conversion.
 #![forbid(unsafe_code)]
 
 use clap::{Args, Parser, Subcommand};
+use macin_atmos::{LossPolicy, Target};
+use macin_format::convert::{ConvertReport, Loss, parse_profile};
 use macin_format::{
     AdmReport, ChunksReport, DEFAULT_METADATA_BUDGET, Error, InfoReport, Result, timecode,
 };
@@ -10,7 +12,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Inspect RIFF/RF64/BW64 containers and their ADM metadata. Never modifies the file.
+/// Inspect RIFF/RF64/BW64 containers and their ADM metadata, and convert DAMF masters.
+/// Never modifies an input and never overwrites an output.
 #[derive(Parser)]
 #[command(name = "mfadm", version)]
 struct Cli {
@@ -37,6 +40,37 @@ enum Command {
         #[command(flatten)]
         budget: Budget,
     },
+    /// Write a DAMF master, or DAMF metadata with a WAV, to one or more profiles in one pass.
+    Convert {
+        /// The DAMF manifest (`.atmos`).
+        manifest: PathBuf,
+        /// An output as PROFILE=PATH, where PROFILE is standard, logic, home or 3dof. Repeat it
+        /// to write several outputs from one pass; a DAMF PATH becomes a directory.
+        #[arg(long = "to", value_name = "PROFILE=PATH", required = true, value_parser = target)]
+        to: Vec<Target>,
+        /// Use this WAV in place of the DAMF audio; its channel n carries DAMF ID n.
+        #[arg(long, value_name = "WAV")]
+        audio: Option<PathBuf>,
+        /// Drop what a profile cannot hold and report it, instead of failing.
+        #[arg(long)]
+        allow_loss: bool,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn target(value: &str) -> std::result::Result<Target, String> {
+    let (profile, path) = value
+        .split_once('=')
+        .ok_or_else(|| "expected PROFILE=PATH".to_owned())?;
+    if path.is_empty() {
+        return Err("the output path is empty".into());
+    }
+    Ok(Target {
+        profile: parse_profile(profile).map_err(|e| e.message)?,
+        path: path.into(),
+    })
 }
 
 #[derive(Args)]
@@ -89,6 +123,21 @@ fn run(cli: Cli) -> Result<()> {
             c.json,
             text_adm,
         ),
+        Command::Convert {
+            manifest,
+            to,
+            audio,
+            allow_loss,
+            json,
+        } => {
+            let policy = if allow_loss {
+                LossPolicy::Allow
+            } else {
+                LossPolicy::Reject
+            };
+            let report = macin_format::convert::convert(&manifest, audio.as_deref(), &to, policy)?;
+            emit(&mut out, &report, json, text_convert)
+        }
         Command::Axml { file, budget } => {
             out.write_all(&macin_format::axml(&file, budget.bytes()?)?)?;
             Ok(out.flush()?)
@@ -235,6 +284,51 @@ fn text_adm(r: &AdmReport) -> String {
         for w in &r.warnings {
             s += &format!("  {w}\n");
         }
+    }
+    s
+}
+
+fn text_losses(s: &mut String, losses: &[Loss]) {
+    for loss in losses {
+        let mut at = Vec::new();
+        if let Some(track) = loss.track {
+            at.push(format!("track {track}"));
+        }
+        if let Some(sample) = loss.sample {
+            at.push(format!("sample {sample}"));
+        }
+        let at = if at.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", at.join(", "))
+        };
+        *s += &format!("   lost {}{at}: {}\n", loss.field, loss.message);
+    }
+}
+
+fn text_convert(r: &ConvertReport) -> String {
+    let mut s = format!(
+        "{} ({}): {} objects, {} updates",
+        r.source.display(),
+        r.source_profile,
+        r.objects,
+        r.updates
+    );
+    if let Some(audio) = &r.audio {
+        s += &format!(", audio from {}", audio.display());
+    }
+    s += "\n";
+    text_losses(&mut s, &r.read_losses);
+    for o in &r.outputs {
+        s += &format!(
+            "-> {} ({}): {} frames, {} channels, {} Hz\n",
+            o.path.display(),
+            o.profile,
+            o.frames,
+            o.channels,
+            o.sample_rate
+        );
+        text_losses(&mut s, &o.losses);
     }
     s
 }

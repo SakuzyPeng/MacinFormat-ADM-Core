@@ -16,6 +16,11 @@ macin-bwf.workspace = true
 quick-xml.workspace = true
 libm.workspace = true
 renamore.workspace = true
+saphyr-parser = { workspace = true, optional = true }
+
+[features]
+# DAMF reading and conversion. Off by default so writers keep their dependency graph.
+read = ["dep:saphyr-parser"]
 
 [lints]
 workspace = true

@@ -1,8 +1,12 @@
-//! Read-only inspection of RIFF/RF64/BW64 containers and their ADM metadata, behind `mfadm`.
+//! Inspection of RIFF/RF64/BW64 containers and their ADM metadata, and DAMF conversion, behind
+//! `mfadm`.
 //!
-//! Every report is a plain serialisable value built from the public `macin-bwf` / `macin-adm` API;
-//! the binary only chooses between text and JSON. Nothing here writes to the inspected file.
+//! Every report is a plain serialisable value built from the public `macin-bwf` / `macin-adm` /
+//! `macin-atmos` API; the binary only chooses between text and JSON. Inspection never writes;
+//! conversion only creates new outputs and never touches its inputs.
 #![forbid(unsafe_code)]
+
+pub mod convert;
 
 use macin_adm::records::{NONE, Span};
 use macin_adm::{Document, Snapshot, TrackUidDefinition};
