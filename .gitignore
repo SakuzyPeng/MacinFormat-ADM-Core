@@ -1,0 +1,5 @@
+/target/
+/.cargo/config.toml
+/artifacts/
+.env.local
+.DS_Store

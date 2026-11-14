@@ -1,0 +1,18 @@
+[package]
+name = "macin-atmos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+macin-adm.workspace = true
+macin-bwf.workspace = true
+quick-xml.workspace = true
+libm.workspace = true
+renamore.workspace = true
+
+[lints]
+workspace = true

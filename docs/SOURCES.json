@@ -1,0 +1,103 @@
+{
+  "repository": "https://github.com/SakuzyPeng/MacinRender-ADM-Core",
+  "commit": "961370d599449254ffc4bebc8739ce69381f0667",
+  "license": "MIT; common definitions retain their Apache-2.0 notice",
+  "files": [
+    {
+      "path": "rust/crates/mradm-adm/src/document.rs",
+      "sha256": "91af15516ba9f75987b7691d12894728af407286f9dbfb0b66de6cb34db0bc38",
+      "destination": "crates/macin-adm/src/document.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/generate.rs",
+      "sha256": "fff357d0cd1faeb861d739c6223f870ad5b8aa6d0fc59af5160bf541c29115a1",
+      "destination": "crates/macin-adm/src/generate.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/lib.rs",
+      "sha256": "9a4b13a85bc36c575869dff19b2bb3effc21edcfc06793dfb7a4f18afd5e5718",
+      "destination": "crates/macin-adm/src/lib.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/numeric.rs",
+      "sha256": "38a634d58d0ca5867f83cfc66c843ac57ac46ab577d97db16ab2ddbc5187c356",
+      "destination": "crates/macin-adm/src/numeric.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/patch.rs",
+      "sha256": "997a45209a6c42a2b10e62395a4e57b3d0fb94656f64352fc01611f9bbdbb129",
+      "destination": "crates/macin-adm/src/patch.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/project.rs",
+      "sha256": "3ca38bf393a2b2a41091996b71aa6a2881789cf279cd0eba0cf06cc391dfd96d",
+      "destination": "crates/macin-adm/src/project.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/records.rs",
+      "sha256": "e53b9a30d8243fa6587694dc45f9a5424f62bf2952926c4607be4bb5766033e0",
+      "destination": "crates/macin-adm/src/records.rs"
+    },
+    {
+      "path": "rust/crates/mradm-adm/src/xml.rs",
+      "sha256": "68797e37c80085a4c797f7de08d54db7ac6d423eee06dceedeebcb00edf16ae2",
+      "destination": "crates/macin-adm/src/xml.rs"
+    },
+    {
+      "path": "rust/crates/mradm-wav/src/chna.rs",
+      "sha256": "a6f13d455467b308225b92888d1b40981ae0a853e4348a6471876655ae71e15d",
+      "destination": "crates/macin-bwf/src/chna.rs"
+    },
+    {
+      "path": "rust/crates/mradm-wav/src/edit.rs",
+      "sha256": "01bd9bf7633ec0244954b1292743be177f7b79be2cdb346b35663dce6a4432b5",
+      "destination": "crates/macin-bwf/src/edit.rs"
+    },
+    {
+      "path": "rust/crates/mradm-wav/src/lib.rs",
+      "sha256": "f04c382e261b7ad3b58d676535165bc1b0405ac03b45fdadcceffdf3ad808d90",
+      "destination": "crates/macin-bwf/src/lib.rs"
+    },
+    {
+      "path": "rust/crates/mradm-wav/src/reader.rs",
+      "sha256": "657586678a175294d13733c122fc737612febf0c5583804be6ea3573db6f0c09",
+      "destination": "crates/macin-bwf/src/reader.rs"
+    },
+    {
+      "path": "rust/crates/mradm-wav/src/writer.rs",
+      "sha256": "fade5dfa12cd348c2f1570cb4fbdfe210a7539c665383bbe671a96d2fe5d3f1a",
+      "destination": "crates/macin-bwf/src/writer.rs"
+    }
+  ],
+  "atmos_sources": {
+    "repository": "https://github.com/SakuzyPeng/MacinDecode-AC4-Core",
+    "commit": "69685c0cf5ddbd2bf38fa0568ae35f0bc4aa980f",
+    "license": "MIT",
+    "files": [
+      {
+        "path": "crates/macindecode-ac4-cli/src/adm/enabled/axml.rs",
+        "sha256": "1b2e84f1cb1f7bc04d9d772f68a010d327a72953b555123a1bb93b87ef6b929f"
+      },
+      {
+        "path": "crates/macindecode-ac4-cli/src/adm/enabled/dbmd.rs",
+        "sha256": "c74ad955d1603259b4f2608fb7322f7a3530345a13698f5adc5db82eecc35275"
+      },
+      {
+        "path": "crates/macindecode-ac4-cli/src/adm/enabled/wave.rs",
+        "sha256": "e0f53a126b95c15c214a331b79164628d5b7d777d7ea2309f51878da9a0ade1b"
+      },
+      {
+        "path": "crates/macindecode-ac4-cli/src/damf/enabled/manifest.rs",
+        "sha256": "e49d10ebdfb225001712ad0b69ad82306068320a3d65ff26770d4aeceba4e1ad"
+      },
+      {
+        "path": "crates/macindecode-ac4-cli/src/damf/enabled/metadata.rs",
+        "sha256": "80576e4352f1d9d814012c564b292ff4526d83980edad450f06b94ab71bcb2af"
+      },
+      {
+        "path": "crates/macindecode-ac4-cli/src/damf/enabled/package.rs",
+        "sha256": "a2e469d74eca84b60b70c86ff45134592a917a24908ef99666245d0d593eadaa"
+      }
+    ]
+  }
+}
