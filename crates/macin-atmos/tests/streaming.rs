@@ -446,3 +446,25 @@ fn topology_bounds_and_maximum_track_ids() {
     s.sample_rate = 44_100;
     assert!(s.validate().is_err());
 }
+
+#[test]
+fn tiny_gain_is_not_silently_muted_and_tiny_priority_loss_is_reported() {
+    let tmp = Temp::new();
+    let mut s = spec(Profile::Standard, 48_000);
+    s.objects[0].initial.gain = Gain::Linear(1e-20);
+    let path = tmp.path("quiet.wav");
+    let mut writer = MasterWriter::create(&path, s.clone()).unwrap();
+    writer
+        .write_block(PcmBlock::F32Interleaved(&pcm(1)), &[])
+        .unwrap();
+    writer.finish().unwrap();
+    let parsed = snapshot(&fs::read(path).unwrap());
+    assert!(parsed.object_blocks[0].gain > 0.);
+    s.objects[0].initial.importance = 1e-20;
+    assert_eq!(
+        MasterWriter::create(tmp.path("priority.wav"), s)
+            .unwrap_err()
+            .field,
+        Some("importance")
+    );
+}

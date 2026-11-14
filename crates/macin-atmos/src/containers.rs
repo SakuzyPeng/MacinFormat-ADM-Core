@@ -33,6 +33,13 @@ where
         dbmd,
         compatibility,
     } = spec;
+    if !compatibility.is_adm()
+        || !(10..=128).contains(&channels)
+        || !matches!(sample_rate, 48_000 | 96_000)
+        || frames == 0
+    {
+        return Err("Invalid Atmos ADM container specification".to_owned());
+    }
     let channels_u16 = u16::try_from(channels).map_err(|_| "ADM BWF channel count exceeds u16")?;
     let block_align_u64 = u64::from(channels_u16)
         .checked_mul(BYTES_PER_SAMPLE)

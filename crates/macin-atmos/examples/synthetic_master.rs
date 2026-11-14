@@ -34,6 +34,30 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     }])?;
+    if !profile.is_adm() {
+        writer.schedule_updates(&[
+            ObjectUpdate {
+                track: TrackId(901),
+                sample: u64::from(rate) * 3 / 4,
+                ramp_samples: None,
+                patch: ObjectPatch {
+                    head_tracking: Some(HeadTracking::HeadRelative),
+                    binaural_mode: Some(BinauralMode::Far),
+                    ..Default::default()
+                },
+            },
+            ObjectUpdate {
+                track: TrackId(901),
+                sample: u64::from(rate) * 5 / 4,
+                ramp_samples: None,
+                patch: ObjectPatch {
+                    head_tracking: Some(HeadTracking::SceneRelative),
+                    binaural_mode: Some(BinauralMode::Near),
+                    ..Default::default()
+                },
+            },
+        ])?;
+    }
     let total = rate as usize * 2;
     for start in (0..total).step_by(512) {
         let n = 512.min(total - start);

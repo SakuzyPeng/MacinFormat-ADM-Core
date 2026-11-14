@@ -36,6 +36,9 @@ pub fn number(v: f64, precision: usize) -> String {
         return "0".into();
     }
     let mut text = format!("{v:.precision$}");
+    if text.parse::<f64>() == Ok(0.0) {
+        return v.to_string();
+    }
     while text.ends_with('0') {
         text.pop();
     }

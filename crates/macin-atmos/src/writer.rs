@@ -739,7 +739,10 @@ fn mapped(
                 "binaural_mode",
                 state.binaural_mode != BinauralMode::Undefined,
             ),
-            ("importance", (state.importance * 10.).fract().abs() > 1e-12),
+            (
+                "importance",
+                (state.importance * 10.).round() / 10. != state.importance,
+            ),
         ] {
             if lost {
                 loss(
