@@ -1,5 +1,7 @@
 # MacinFormat-ADM-Core
 
+**简体中文** · [English](README.en.md)
+
 **ADM/BWF 读写与 Atmos 母版写入的 Rust 基础库** · Rust 2024 · MSRV 1.98 · MIT
 
 一个**只管文件格式**的 Rust 库：解析、投影和回写 ADM XML，读写 RIFF/RF64/BW64 容器，并把对象音频流式写成
