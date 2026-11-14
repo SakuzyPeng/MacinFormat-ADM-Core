@@ -1,0 +1,27 @@
+[package]
+name = "macin-format"
+description = "Read-only inspection CLI for RIFF/RF64/BW64 containers and ADM metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "mfadm"
+path = "src/main.rs"
+
+[dependencies]
+macin-adm.workspace = true
+macin-bwf.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+macin-atmos = { path = "../macin-atmos" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/macin-adm", "crates/macin-bwf", "crates/macin-atmos"]
+members = ["crates/macin-adm", "crates/macin-bwf", "crates/macin-atmos", "crates/macin-format"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,9 @@ macin-bwf = { path = "crates/macin-bwf", version = "0.1.0" }
 libm = "=0.2.16"
 quick-xml = { version = "=0.41.0", default-features = false }
 renamore = "=0.3.2"
+clap = { version = "=4.6.7", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

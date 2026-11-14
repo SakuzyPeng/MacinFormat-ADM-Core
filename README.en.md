@@ -19,6 +19,7 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 - [The three crates](#the-three-crates)
 - [Getting it](#getting-it)
 - [Quickstart](#quickstart)
+- [The mfadm command](#the-mfadm-command)
 - [Master writing rules](#master-writing-rules)
 - [The four master profiles](#the-four-master-profiles)
 - [Semantic loss and diagnostics](#semantic-loss-and-diagnostics)
@@ -39,6 +40,8 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 - **Read and write WAVE containers**: streaming RIFF / RF64 / BW64 I/O, frame seeking, and reading and
   editing chunks such as `chna` / `bext`. Metadata is read within a budget the caller supplies, and opening
   a file never allocates unknown chunks.
+- **Inspect from the command line**: `mfadm` lists chunks, the audio format, `chna` and an ADM summary,
+  with JSON output.
 - **Write Atmos masters**: a fixed 7.1.2 bed plus up to 118 objects, with PCM and object metadata updates
   written block by block, output as Standard BW64, Logic RF64, DAMF home or DAMF 3DoF, and committed
   atomically on completion.
@@ -53,6 +56,9 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 
 All three forbid unsafe code (`unsafe_code = "forbid"`). Their only dependencies are `quick-xml`, `libm` and
 `renamore`, each pinned to an exact version.
+
+A fourth, unpublished crate, `macin-format`, provides the read-only [`mfadm`](#the-mfadm-command) command;
+its extra dependencies, `clap` and `serde_json`, never reach the three libraries.
 
 ## Getting it
 
@@ -134,6 +140,34 @@ cargo run -p macin-atmos --example synthetic_master -- result.wav standard 96000
 
 The second argument is one of `standard` / `logic` / `home` / `3dof`, the third `48000` / `96000`.
 
+## The mfadm command
+
+`mfadm` reads and never writes: it shows what is inside a RIFF/RF64/BW64 file. To install it into
+`~/.cargo/bin`:
+
+```sh
+cargo install --locked --path crates/macin-format
+```
+
+| Subcommand | Output |
+| --- | --- |
+| `mfadm chunks <file>` | The container type and each chunk's ID, payload offset and size; decodes neither `fmt ` nor the audio |
+| `mfadm info <file>` | Sample rate, channels, bit depth, frames and duration, and the `chna` track table |
+| `mfadm adm <file>` | Resolves the ADM against the file's own `chna` and sample rate and summarises programmes, contents, objects, tracks and blocks, listing any skipped `typeDefinition` |
+| `mfadm axml <file>` | Writes the `axml` chunk to stdout byte for byte, for comparison with external tools |
+
+`chunks`, `info` and `adm` take `--json` for machine-readable output. `adm` and `axml` read metadata within a
+budget, 256 MiB by default, adjustable with `--max-metadata <MiB>`. Failures exit with 1, usage errors with 2.
+
+```text
+$ mfadm adm result.wav
+1 programmes, 1 contents, 3 objects, 0 HOA packs; 4 object blocks, 10 DirectSpeakers blocks
+...
+object AO_100b "Moving object"  Objects
+  start 0:00:00.000, duration 0:00:02.000, gain 1
+  ATU_0000000b -> track 11, 3 object blocks
+```
+
 ## Master writing rules
 
 **Track layout**
@@ -201,6 +235,8 @@ applies explicit degradations, each recorded as a `MappingDiagnostic`.
 
 - No DAMF **reading**, multi-bed authoring, resampling, rendering or encoding algorithms (first release).
 - No rendering, clustering or coding; no C ABI.
+- `mfadm` neither modifies nor converts files: a format conversion would drop semantics without saying so,
+  which runs against `LossPolicy::Reject`.
 - No faked creation tool provenance: the real creator is kept even when an external checker rejects the file
   for it (see below).
 

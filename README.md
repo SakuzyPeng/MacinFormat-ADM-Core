@@ -17,6 +17,7 @@ ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象�
 - [三个 crate](#三个-crate)
 - [获取](#获取)
 - [快速上手](#快速上手)
+- [命令行工具 mfadm](#命令行工具-mfadm)
 - [母版写入规则](#母版写入规则)
 - [四种母版配置](#四种母版配置)
 - [语义损失与诊断](#语义损失与诊断)
@@ -35,6 +36,7 @@ ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象�
 - **生成 ADM**：为 DirectSpeakers、HOA3 和 Binaural 渲染结果生成 AXML 与配套 `chna`。
 - **读写 WAVE 容器**：RIFF / RF64 / BW64 的流式读写、按帧跳转、`chna` / `bext` 等 chunk 的读取与编辑，
   元数据按调用方给定的预算读取，打开文件时不分配未知 chunk。
+- **命令行检查**：`mfadm` 列出 chunk、音频格式、`chna` 和 ADM 摘要，可输出 JSON。
 - **写 Atmos 母版**：固定 7.1.2 bed 加最多 118 个对象，分块写入 PCM 和对象元数据更新，
   输出 Standard BW64、Logic RF64、DAMF home 或 DAMF 3DoF，完成后原子提交。
 
@@ -47,6 +49,9 @@ ADM BWF 或 DAMF 形式的 Atmos 母版。它把渲染、解码导出、对象�
 | `macin-atmos` | `MasterSpec`、`MasterWriter` | 来源无关的 ADM BWF / DAMF 母版写入；依赖前两者 |
 
 三者都禁止 unsafe（`unsafe_code = "forbid"`），依赖只有 `quick-xml`、`libm` 和 `renamore`，版本全部锁定。
+
+另有不发布的 `macin-format`，提供只读检查命令 [`mfadm`](#命令行工具-mfadm)；它额外依赖 `clap` 和 `serde_json`，
+这些依赖不会进入三个库。
 
 ## 获取
 
@@ -127,6 +132,33 @@ cargo run -p macin-atmos --example synthetic_master -- result.wav standard 96000
 
 第二个参数可选 `standard` / `logic` / `home` / `3dof`，第三个可选 `48000` / `96000`。
 
+## 命令行工具 mfadm
+
+`mfadm` 只读不写，用来查看一个 RIFF/RF64/BW64 文件里有什么。安装到 `~/.cargo/bin`：
+
+```sh
+cargo install --locked --path crates/macin-format
+```
+
+| 子命令 | 输出 |
+| --- | --- |
+| `mfadm chunks <file>` | 容器类型，以及每个 chunk 的 ID、负载偏移和大小；不解码 `fmt ` 和音频 |
+| `mfadm info <file>` | 采样率、声道数、位深、帧数与时长，`chna` 里的轨道对应关系 |
+| `mfadm adm <file>` | 按文件自身的 `chna` 和采样率解析 ADM，汇总 programme、content、object、轨道与 block，列出被跳过的 `typeDefinition` |
+| `mfadm axml <file>` | 把 `axml` chunk 原样写到 stdout，方便和外部工具的结果做对比 |
+
+`chunks`、`info`、`adm` 加 `--json` 输出机器可读的 JSON，供脚本使用。`adm` 和 `axml` 读元数据时有预算，
+默认 256 MiB，可用 `--max-metadata <MiB>` 调整。出错时退出码为 1，参数错误为 2。
+
+```text
+$ mfadm adm result.wav
+1 programmes, 1 contents, 3 objects, 0 HOA packs; 4 object blocks, 10 DirectSpeakers blocks
+...
+object AO_100b "Moving object"  Objects
+  start 0:00:00.000, duration 0:00:02.000, gain 1
+  ATU_0000000b -> track 11, 3 object blocks
+```
+
 ## 母版写入规则
 
 **轨道布局**
@@ -182,6 +214,7 @@ cargo run -p macin-atmos --example synthetic_master -- result.wav standard 96000
 
 - 不做 DAMF **读取**、多 bed 制作、重采样、渲染或编码算法（首版）。
 - 不做渲染、聚类或编解码；不导出 C ABI。
+- `mfadm` 不修改、不转换文件：格式转换会在没有提示的情况下丢语义，和 `LossPolicy::Reject` 的思路相冲突。
 - 不在文件里伪造创建工具来源：即使某个外部检查器因此拒绝，也保留真实创建者（见下文）。
 
 ## 开发与验收

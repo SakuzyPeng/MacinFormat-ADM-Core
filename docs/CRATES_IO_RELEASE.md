@@ -2,6 +2,8 @@
 
 当前准备 `0.1.0` 的包元数据与归档，尚未上传 crates.io。公开 GitHub 源码可作为固定提交的 Git 依赖使用。
 
+`macin-format`（`mfadm` 命令）设为 `publish = false`，`cargo publish --workspace` 会跳过它。
+
 三个 crate 继承 workspace 版本、MSRV、MIT 与仓库地址，归档包含 README 和许可证。
 `macin-adm` 同时携带 common definitions 的 Apache-2.0 LICENSE、NOTICE 与来源清单。
 
