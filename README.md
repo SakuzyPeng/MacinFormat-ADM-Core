@@ -76,3 +76,14 @@ cargo run -p macin-atmos --example synthetic_master -- result.wav standard 96000
 
 scripts/check_interop.py 使用调用方提供的 Dolby Conversion Tool 和可选 mradm 读取器验证合成输出。
 同源读回只作为集成验证，不能替代独立格式验收。验证记录见 [VALIDATION.md](docs/VALIDATION.md)。
+
+### 本机工具兼容性
+
+当前 Conversion Tool 2.1.2 接受 Logic RF64 与 DAMF home，48/96 kHz 转换保持 PCM 字节。
+它不识别 BW64，且 DAMF 版本上限为 0.5；BW64 由 EAR 校验，3DoF 由较新的 atmos_info 验证。
+atmos_info 对自行生成的 RF64 还执行创建工具来源检查，库不会因此改写为 Dolby 创建者。
+这些边界在独立检查器中作为明确的工具限制记录，不把拒绝写成通过。
+
+完整矩阵需要同一 Python 环境内安装 EBU EAR，并提供外部工具路径：
+
+    python scripts/check_interop.py --ear --conversion-tool /path/to/cmdline_atmos_conversion_tool --atmos-info /path/to/atmos_info --report artifacts/interop.json

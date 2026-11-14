@@ -1,0 +1,117 @@
+{
+  "schema": "macin-format.interop.v1",
+  "conversion_tool_version": "cmdline_atmos_conversion_tool v2.1.2_07765940",
+  "ear_version": "2.1.0",
+  "cases": [
+    {
+      "profile": "standard",
+      "sample_rate": 48000,
+      "conversion_exit": 253,
+      "pcm_sha256": "27a671d741556b728469479cc0a866bee5f12fb455780f0311735fc71d2bc1cb",
+      "atmos_info_exit": 1,
+      "mradm_exit": 0,
+      "ear_exit": 0,
+      "limitations": [
+        "Conversion Tool does not recognize BW64",
+        "atmos_info does not recognize BW64"
+      ],
+      "accepted": true
+    },
+    {
+      "profile": "logic",
+      "sample_rate": 48000,
+      "conversion_exit": 0,
+      "pcm_sha256": "27a671d741556b728469479cc0a866bee5f12fb455780f0311735fc71d2bc1cb",
+      "channels": 12,
+      "converted_sample_rate": 48000,
+      "converted_frames": 96000,
+      "pcm_identical": true,
+      "atmos_info_exit": 1,
+      "mradm_exit": 0,
+      "ear_exit": 0,
+      "limitations": [
+        "atmos_info rejects non-Dolby creator metadata for this RF64 input"
+      ],
+      "accepted": true
+    },
+    {
+      "profile": "home",
+      "sample_rate": 48000,
+      "conversion_exit": 0,
+      "pcm_sha256": "27a671d741556b728469479cc0a866bee5f12fb455780f0311735fc71d2bc1cb",
+      "channels": 12,
+      "converted_sample_rate": 48000,
+      "converted_frames": 96000,
+      "pcm_identical": true,
+      "atmos_info_exit": 0,
+      "limitations": [],
+      "accepted": true
+    },
+    {
+      "profile": "3dof",
+      "sample_rate": 48000,
+      "conversion_exit": 253,
+      "pcm_sha256": "27a671d741556b728469479cc0a866bee5f12fb455780f0311735fc71d2bc1cb",
+      "atmos_info_exit": 0,
+      "limitations": [
+        "Conversion Tool supports DAMF through 0.5 only"
+      ],
+      "accepted": true
+    },
+    {
+      "profile": "standard",
+      "sample_rate": 96000,
+      "conversion_exit": 253,
+      "pcm_sha256": "4b077c45fdc0a02a488d6f2878d9008a376d647ed76bad207f77726ea81ee3b2",
+      "atmos_info_exit": 1,
+      "mradm_exit": 0,
+      "ear_exit": 0,
+      "limitations": [
+        "Conversion Tool does not recognize BW64",
+        "atmos_info does not recognize BW64"
+      ],
+      "accepted": true
+    },
+    {
+      "profile": "logic",
+      "sample_rate": 96000,
+      "conversion_exit": 0,
+      "pcm_sha256": "4b077c45fdc0a02a488d6f2878d9008a376d647ed76bad207f77726ea81ee3b2",
+      "channels": 12,
+      "converted_sample_rate": 96000,
+      "converted_frames": 192000,
+      "pcm_identical": true,
+      "atmos_info_exit": 1,
+      "mradm_exit": 0,
+      "ear_exit": 0,
+      "limitations": [
+        "atmos_info rejects non-Dolby creator metadata for this RF64 input"
+      ],
+      "accepted": true
+    },
+    {
+      "profile": "home",
+      "sample_rate": 96000,
+      "conversion_exit": 0,
+      "pcm_sha256": "4b077c45fdc0a02a488d6f2878d9008a376d647ed76bad207f77726ea81ee3b2",
+      "channels": 12,
+      "converted_sample_rate": 96000,
+      "converted_frames": 192000,
+      "pcm_identical": true,
+      "atmos_info_exit": 0,
+      "limitations": [],
+      "accepted": true
+    },
+    {
+      "profile": "3dof",
+      "sample_rate": 96000,
+      "conversion_exit": 253,
+      "pcm_sha256": "4b077c45fdc0a02a488d6f2878d9008a376d647ed76bad207f77726ea81ee3b2",
+      "atmos_info_exit": 0,
+      "limitations": [
+        "Conversion Tool supports DAMF through 0.5 only"
+      ],
+      "accepted": true
+    }
+  ]
+}
