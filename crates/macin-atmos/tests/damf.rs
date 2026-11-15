@@ -1,5 +1,5 @@
 #![cfg(feature = "read")]
-use macin_atmos::damf::DamfReader;
+use macin_atmos::damf::{CafReader, DamfReader};
 use macin_atmos::*;
 use macin_bwf::{Format, Reader, SampleFormat, Writer, WriterOptions};
 use std::{
@@ -677,4 +677,203 @@ fn malformed_or_unsupported_input_is_refused() {
     fs::write(dir.path("mix.atmos.audio"), float).unwrap();
     let error = reader.audio().unwrap_err();
     assert_eq!(error.kind, ErrorKind::Unsupported, "{error}");
+}
+
+fn copy_caf_to_wave(caf: &Path, wave: &Path) {
+    let mut source = CafReader::open(caf).unwrap();
+    let mut writer = Writer::new(
+        fs::File::create(wave).unwrap(),
+        Format {
+            channels: u16::try_from(source.channels()).unwrap(),
+            sample_rate: source.sample_rate(),
+            sample_format: SampleFormat::Pcm24,
+            channel_mask: None,
+        },
+        WriterOptions::default(),
+    )
+    .unwrap();
+    let mut pcm = Vec::new();
+    while source.read(1000, &mut pcm).unwrap() > 0 {
+        writer.write_pcm_bytes(&pcm).unwrap();
+    }
+    writer.finish().unwrap().flush().unwrap();
+}
+
+#[test]
+fn conversion_rewinds_previewed_caf_and_wave_audio() {
+    let dir = Temp::new();
+    let manifest = third_party(&dir, THIRD_PARTY_METADATA);
+    let reader = DamfReader::open(manifest, LossPolicy::Reject).unwrap();
+    let wave = dir.path("source.wav");
+    copy_caf_to_wave(reader.audio_path(), &wave);
+    let direct = targets(&dir, &[Profile::Standard]);
+    reader.convert(reader.audio().unwrap(), &direct).unwrap();
+    let expected = fs::read(&direct[0].path).unwrap();
+
+    for preview in [0, 100, 4800] {
+        let sources = [reader.audio().unwrap(), reader.wave_audio(&wave).unwrap()];
+        for (index, mut audio) in sources.into_iter().enumerate() {
+            assert_eq!(audio.read_s24(preview, &mut Vec::new()).unwrap(), preview);
+            let target = Target {
+                path: dir.path(&format!("preview-{preview}-{index}.wav")),
+                profile: Profile::Standard,
+            };
+            let conversion = reader
+                .convert(audio, std::slice::from_ref(&target))
+                .unwrap();
+            assert_eq!(conversion.outputs[0].frames, 4800);
+            assert_eq!(fs::read(&target.path).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn conversion_checks_a_foreign_audio_sources_sample_rate() {
+    let dir = Temp::new();
+    let manifest = third_party(&dir, THIRD_PARTY_METADATA);
+    let reader = DamfReader::open(manifest, LossPolicy::Reject).unwrap();
+    let other = Temp::new();
+    let manifest = third_party(&other, &THIRD_PARTY_METADATA.replace("48000", "96000"));
+    let mut caf = fs::read(other.path("mix.atmos.audio")).unwrap();
+    caf[20..28].copy_from_slice(&96_000f64.to_be_bytes());
+    fs::write(other.path("mix.atmos.audio"), caf).unwrap();
+    let foreign = DamfReader::open(manifest, LossPolicy::Reject).unwrap();
+    let wave = other.path("source.wav");
+    copy_caf_to_wave(foreign.audio_path(), &wave);
+
+    for audio in [foreign.audio().unwrap(), foreign.wave_audio(&wave).unwrap()] {
+        let out = targets(&dir, &[Profile::Standard]);
+        let error = reader.convert(audio, &out).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
+        assert!(
+            error.message.contains("96000 Hz") && error.message.contains("48000 Hz"),
+            "{error}"
+        );
+        assert!(!out[0].path.exists());
+    }
+}
+
+#[test]
+fn conversion_maps_foreign_audio_to_the_destination_readers_channels() {
+    let dir = Temp::new();
+    let manifest = third_party(&dir, THIRD_PARTY_METADATA);
+    let reader = DamfReader::open(manifest, LossPolicy::Reject).unwrap();
+    let direct = targets(&dir, &[Profile::Standard]);
+    reader.convert(reader.audio().unwrap(), &direct).unwrap();
+
+    let other = Temp::new();
+    let manifest = third_party(&other, THIRD_PARTY_METADATA);
+    fs::write(
+        &manifest,
+        THIRD_PARTY_MANIFEST
+            .replace("{channel: L, ID: 10}", "{channel: L, ID: 9}")
+            .replace("{channel: R, ID: 9}", "{channel: R, ID: 10}"),
+    )
+    .unwrap();
+    let foreign = DamfReader::open(manifest, LossPolicy::Reject).unwrap();
+    let wave = other.path("source.wav");
+    copy_caf_to_wave(foreign.audio_path(), &wave);
+    let sources = [foreign.audio().unwrap(), foreign.wave_audio(&wave).unwrap()];
+    for (index, audio) in sources.into_iter().enumerate() {
+        let target = Target {
+            path: dir.path(&format!("remapped-{index}.wav")),
+            profile: Profile::Standard,
+        };
+        reader
+            .convert(audio, std::slice::from_ref(&target))
+            .unwrap();
+        assert_eq!(
+            fs::read(&target.path).unwrap(),
+            fs::read(&direct[0].path).unwrap()
+        );
+    }
+}
+
+#[test]
+fn malformed_caf_channel_counts_return_structured_errors() {
+    let dir = Temp::new();
+    let path = dir.path("bad.caf");
+    let mut header = Vec::new();
+    containers::write_caf_header(&mut header, Some(0), 1, 48_000).unwrap();
+    for (channels, bytes_per_packet) in [
+        (0u32, 0u32),
+        (14, 41),
+        (u32::MAX, u32::MAX.wrapping_mul(3)),
+        (u32::MAX / 3 + 1, 2),
+    ] {
+        header[36..40].copy_from_slice(&bytes_per_packet.to_be_bytes());
+        header[44..48].copy_from_slice(&channels.to_be_bytes());
+        fs::write(&path, &header).unwrap();
+        let error = CafReader::open(&path).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
+        assert!(
+            error.message.contains("invalid CAF channel layout"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn unknown_bed_channel_fields_follow_the_loss_policy() {
+    let dir = Temp::new();
+    let manifest = third_party(&dir, THIRD_PARTY_METADATA);
+    fs::write(
+        &manifest,
+        THIRD_PARTY_MANIFEST.replace(
+            "{channel: L, ID: 10}",
+            "{channel: L, ID: 10, customGain: -6}",
+        ),
+    )
+    .unwrap();
+    let error = DamfReader::open(&manifest, LossPolicy::Reject).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert_eq!(error.field, Some("unknown_field"));
+    assert_eq!(error.track, Some(TrackId(10)));
+    assert_eq!(error.sample, None);
+    assert!(error.message.contains("customGain"), "{error}");
+
+    let reader = DamfReader::open(&manifest, LossPolicy::Allow).unwrap();
+    assert_eq!(reader.diagnostics().len(), 1);
+    let diagnostic = &reader.diagnostics()[0];
+    assert_eq!(diagnostic.field, "unknown_field");
+    assert_eq!(diagnostic.track, Some(TrackId(10)));
+    assert_eq!(diagnostic.sample, None);
+    assert_eq!(diagnostic.message, error.message);
+    let conversion = reader
+        .convert(
+            reader.audio().unwrap(),
+            &targets(&dir, &[Profile::DamfHome]),
+        )
+        .unwrap();
+    assert_eq!(conversion.read, reader.diagnostics());
+}
+
+#[test]
+fn duplicate_metadata_top_level_keys_are_rejected() {
+    let dir = Temp::new();
+    for (metadata, key) in [
+        (
+            format!("sampleRate: 96000\n{THIRD_PARTY_METADATA}"),
+            "sampleRate",
+        ),
+        (
+            format!("{THIRD_PARTY_METADATA}\"sampleRate\": 48000\n"),
+            "sampleRate",
+        ),
+        (format!("{THIRD_PARTY_METADATA}events: []\n"), "events"),
+        (
+            format!("{THIRD_PARTY_METADATA}extension: true\nextension: false\n"),
+            "extension",
+        ),
+    ] {
+        let manifest = third_party(&dir, &metadata);
+        for policy in [LossPolicy::Reject, LossPolicy::Allow] {
+            let error = DamfReader::open(&manifest, policy).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidInput);
+            assert!(
+                error.message.contains(&format!("duplicate key {key:?}")),
+                "{error}"
+            );
+        }
+    }
 }

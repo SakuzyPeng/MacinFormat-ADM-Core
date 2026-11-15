@@ -12,7 +12,7 @@
 use crate::yaml::{self, Node};
 use crate::*;
 use macin_bwf::Reader;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -306,6 +306,7 @@ struct MetadataScan<R: std::io::BufRead + 'static> {
     stream: yaml::FileStream<R>,
     path: PathBuf,
     state: ScanState,
+    keys: BTreeSet<String>,
     sample_rate: Option<u64>,
     unknown: Vec<String>,
 }
@@ -321,6 +322,7 @@ fn open_metadata(path: &Path) -> Result<MetadataScan<BufReader<File>>> {
         stream: yaml::from_reader(BufReader::with_capacity(1 << 16, file)),
         path: path.to_owned(),
         state: ScanState::Keys,
+        keys: BTreeSet::new(),
         sample_rate: None,
         unknown: Vec::new(),
     };
@@ -361,6 +363,9 @@ impl<R: std::io::BufRead + 'static> MetadataScan<R> {
                         self.state = ScanState::Done;
                         return Ok(None);
                     };
+                    if !self.keys.insert(key.clone()) {
+                        return Err(yaml::invalid(line, format!("duplicate key {key:?}")));
+                    }
                     let (event, span) = self.stream.next()?;
                     match key.as_str() {
                         "events"
@@ -637,6 +642,14 @@ impl DamfReader {
                         ));
                     }
                     let value = claim(require(c, "ID", item.line())?, "bed channel")?;
+                    for key in unknown(c, &["channel", "ID"]) {
+                        losses.report(
+                            Some(TrackId(u64::from(value))),
+                            None,
+                            "unknown_field",
+                            format!("Unknown bed channel {label} field {key:?}"),
+                        )?;
+                    }
                     channels[slot] = Some(value);
                     beds.insert(value, slot);
                 }
@@ -882,9 +895,10 @@ impl DamfReader {
         AudioSource::new(self, Input::Wave(wave))
     }
 
-    /// Write the master to every target in one pass through [`MultiWriter`]. DAMF targets keep
-    /// the source's stem.
-    pub fn convert(&self, mut audio: AudioSource, targets: &[Target]) -> Result<Conversion> {
+    /// 通过 [`MultiWriter`] 一次写出所有目标，DAMF 目标保留来源的 stem。
+    /// 转换从音频起点重新读取，并按当前 reader 核对采样率、重建声道映射。
+    pub fn convert(&self, audio: AudioSource, targets: &[Target]) -> Result<Conversion> {
+        let mut audio = AudioSource::new(self, audio.input)?;
         if audio.frames == 0 {
             return Err(Error::invalid("The audio is empty"));
         }
@@ -895,6 +909,7 @@ impl DamfReader {
                 audio.frames
             )));
         }
+        audio.rewind()?;
         let mut writer = MultiWriter::create(&self.spec, targets)?;
         let mut batch = Vec::with_capacity(UPDATE_BATCH);
         for update in self.updates()? {
@@ -963,6 +978,7 @@ impl Iterator for Updates {
 #[derive(Debug)]
 pub struct CafReader {
     source: BufReader<File>,
+    data_start: u64,
     channels: usize,
     sample_rate: u32,
     frames: u64,
@@ -1015,7 +1031,7 @@ impl CafReader {
                         "DAMF audio must be signed 24-bit little-endian PCM",
                     ));
                 }
-                if channels == 0 || bytes_per_packet != channels * 3 {
+                if channels == 0 || channels.checked_mul(3) != Some(bytes_per_packet) {
                     return Err(Error::invalid("invalid CAF channel layout"));
                 }
                 if rate.fract() != 0. || !(1.0..=f64::from(u32::MAX)).contains(&rate) {
@@ -1044,6 +1060,7 @@ impl CafReader {
                 }
                 return Ok(Self {
                     source,
+                    data_start: at + 4,
                     channels,
                     sample_rate,
                     frames: bytes / align,
@@ -1147,6 +1164,18 @@ impl AudioSource {
     }
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+    fn rewind(&mut self) -> Result<()> {
+        match &mut self.input {
+            Input::Caf(caf) => {
+                caf.source.seek(SeekFrom::Start(caf.data_start))?;
+                caf.position = 0;
+            }
+            Input::Wave(wave) => {
+                wave.seek_frame(0)?;
+            }
+        }
+        Ok(())
     }
     /// Read up to `frames` frames into `out`; returns how many were read (0 at the end).
     pub fn read_s24(&mut self, frames: usize, out: &mut Vec<u8>) -> Result<usize> {

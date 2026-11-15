@@ -208,3 +208,50 @@ fn convert_arguments_are_checked_by_clap() {
         assert_eq!(mfadm(&args).status.code(), Some(2), "{args:?}");
     }
 }
+
+#[test]
+fn convert_reports_invalid_caf_layout_without_panicking() {
+    let dir = Scratch::new();
+    let manifest = damf(&dir.0);
+    let audio = dir.path("src/master.atmos.audio");
+    let mut caf = std::fs::read(&audio).unwrap();
+    caf[36..40].copy_from_slice(&u32::MAX.wrapping_mul(3).to_be_bytes());
+    caf[44..48].copy_from_slice(&u32::MAX.to_be_bytes());
+    caf[56..64].copy_from_slice(&4i64.to_be_bytes());
+    caf.truncate(68);
+    std::fs::write(&audio, caf).unwrap();
+    let out = dir.path("out.wav");
+    let output = mfadm(&[
+        "convert".as_ref(),
+        manifest.as_os_str(),
+        &to("standard", &out),
+        "--allow-loss".as_ref(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid CAF channel layout"), "{stderr}");
+    assert!(!out.exists());
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+}
+
+#[test]
+fn convert_rejects_duplicate_metadata_keys_even_when_allowing_loss() {
+    let dir = Scratch::new();
+    let manifest = damf(&dir.0);
+    let metadata = dir.path("src/master.atmos.metadata");
+    let mut text = std::fs::read_to_string(&metadata).unwrap();
+    text.push_str("sampleRate: 96000\n");
+    std::fs::write(&metadata, text).unwrap();
+    let out = dir.path("out.wav");
+    let output = mfadm(&[
+        "convert".as_ref(),
+        manifest.as_os_str(),
+        &to("standard", &out),
+        "--allow-loss".as_ref(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("duplicate key \"sampleRate\""), "{stderr}");
+    assert!(!out.exists());
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+}
