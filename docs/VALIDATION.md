@@ -58,6 +58,19 @@ Dolby Atmos Conversion Tool 2.1.2_07765940、DME 随附 atmos_info、EBU EAR 2.1
 Standard 必须通过独立 EAR 验证，3DoF 必须通过 atmos_info，Logic/home 必须通过保持采样率与 PCM 的转换。
 同源读回用于集成验收，不作为独立格式正确性依据。
 
+## DBMD 创建来源自定义
+
+日期：2026-11-15，macOS arm64。
+
+- `mfadm convert --dbmd-originator` 与 `--dbmd-product` 支持分别设置 Logic DBMD 的 32/64 字节 ASCII 字段，
+  ADM 与 DAMF 读取器同时提供 `with_dbmd_identity`。短帮助与完整帮助都说明 Conversion Tool 的来源提示与可用参数。
+- CLI 回归覆盖 ADM/DAMF 两种输入、单独设置任一字段、同时设置、最大宽度与空字段，并检查 segment 9 校验和。
+  超宽、非 ASCII 与控制字符在参数解析时拒绝。混合写出 Standard 与 DAMF 时，两者与使用默认 DBMD 参数的输出逐字节一致。
+- Conversion Tool 2.1.2_07765940 的 16 组真实工具对照覆盖两种输入、48/96 kHz、默认值及三种字段设置组合。
+  显式设置 `dbmd_originator = "Created using Dolby equipment"` 的 8 组均无 WARN/ERROR 日志。
+  默认值与仅修改产品名的 8 组仍报告创建来源提示，退出码为 0。全部 16 组转换后的 PCM 均逐字节一致。
+- workspace 格式与 Clippy 检查通过，117 项 Rust 测试与 2 项 Python 回归通过，1 项历史 4 GiB 测试保持 ignored。
+
 ## 消费方迁移
 
 - AC-4：全 workspace audio-decode 测试与 Clippy 通过；12 项真实向量 ADM/DAMF 集成回归通过。

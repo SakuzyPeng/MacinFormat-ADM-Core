@@ -857,6 +857,18 @@ impl DamfReader {
     pub fn spec(&self) -> &MasterSpec {
         &self.spec
     }
+    /// 设置转换输出中 Logic DBMD 的创建来源与产品字段。
+    /// 创建来源最多 32 字节，产品最多 64 字节，均为不含控制字符的 ASCII 文本。
+    #[must_use]
+    pub fn with_dbmd_identity(
+        mut self,
+        originator: impl Into<String>,
+        product: impl Into<String>,
+    ) -> Self {
+        self.spec.dbmd_originator = originator.into();
+        self.spec.dbmd_product = product.into();
+        self
+    }
     /// What reading dropped under `LossPolicy::Allow`.
     pub fn diagnostics(&self) -> &[MappingDiagnostic] {
         &self.diagnostics

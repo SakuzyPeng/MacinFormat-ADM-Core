@@ -41,6 +41,13 @@ enum Command {
         budget: Budget,
     },
     /// Write a DAMF master or an ADM BWF to one or more profiles in one pass.
+    #[command(
+        after_help = "Conversion Tool 2.1.2 对 Logic RF64 的创建来源可能输出\n\
+        \"not created by Dolby approved software\" 和 \"input file is not Dolby Atmos\"，\n\
+        即使转换成功且退出码为 0，仍可能有这些日志。实测可通过以下参数消除来源校验提示\n\
+          --dbmd-originator \"Created using Dolby equipment\"\n\
+        DBMD 选项应用于所有 logic 输出目标。"
+    )]
     Convert {
         /// The source: a DAMF manifest (`.atmos`) or an ADM BWF (told apart by its contents).
         source: PathBuf,
@@ -55,6 +62,12 @@ enum Command {
         /// The frame rate an ADM source's outputs declare (ADM carries none; default 24).
         #[arg(long, value_name = "FPS", value_parser = frame_rate)]
         fps: Option<FrameRate>,
+        /// Logic RF64 的 DBMD 创建来源，最多 32 字节 ASCII，默认 Created by MacinFormat。
+        #[arg(long, value_name = "TEXT", value_parser = dbmd_creator::<32>)]
+        dbmd_originator: Option<String>,
+        /// Logic RF64 的 DBMD 产品名称，最多 64 字节 ASCII，默认 MacinFormat ADM Core。
+        #[arg(long, value_name = "TEXT", value_parser = dbmd_creator::<64>)]
+        dbmd_product: Option<String>,
         /// Drop what a profile cannot hold and report it, instead of failing.
         #[arg(long)]
         allow_loss: bool,
@@ -66,6 +79,15 @@ enum Command {
 
 fn frame_rate(value: &str) -> std::result::Result<FrameRate, String> {
     parse_frame_rate(value).map_err(|e| e.message)
+}
+
+fn dbmd_creator<const WIDTH: usize>(value: &str) -> std::result::Result<String, String> {
+    if !value.is_ascii() || value.len() > WIDTH || value.chars().any(char::is_control) {
+        return Err(format!(
+            "请使用不超过 {WIDTH} 字节且不含控制字符的 ASCII 文本"
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn target(value: &str) -> std::result::Result<Target, String> {
@@ -136,6 +158,8 @@ fn run(cli: Cli) -> Result<()> {
             to,
             audio,
             fps,
+            dbmd_originator,
+            dbmd_product,
             allow_loss,
             json,
         } => {
@@ -144,8 +168,15 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 LossPolicy::Reject
             };
-            let report =
-                macin_format::convert::convert(&source, audio.as_deref(), &to, policy, fps)?;
+            let report = macin_format::convert::convert_with_dbmd_identity(
+                &source,
+                audio.as_deref(),
+                &to,
+                policy,
+                fps,
+                dbmd_originator.as_deref(),
+                dbmd_product.as_deref(),
+            )?;
             emit(&mut out, &report, json, text_convert)
         }
         Command::Axml { file, budget } => {

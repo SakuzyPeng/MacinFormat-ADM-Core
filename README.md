@@ -230,6 +230,20 @@ cargo install --locked --path crates/macin-format
 `chunks`、`info`、`adm`、`convert` 加 `--json` 输出机器可读的 JSON，供脚本使用。`adm` 和 `axml` 读元数据时有预算，
 默认 256 MiB，可用 `--max-metadata <MiB>` 调整。出错时退出码为 1，参数错误为 2。
 
+`convert --dbmd-originator <TEXT>` 与 `--dbmd-product <TEXT>` 可自定义所有 Logic 输出的 DBMD 创建来源与产品名，
+分别接受最多 32 和 64 字节且不含控制字符的 ASCII 文本。默认值为 `Created by MacinFormat` 与 `MacinFormat ADM Core`。
+Conversion Tool 2.1.2 对默认 Logic 创建来源会输出 `not created by Dolby approved software` 和
+`input file is not Dolby Atmos`，即使转换完成且退出码为 0，仍会出现这些日志。实测以下参数可消除来源校验提示，
+`mfadm convert --help` 中也包含这一说明。
+
+```sh
+mfadm convert input.wav --to logic=output.wav \
+  --dbmd-originator "Created using Dolby equipment"
+```
+
+Rust 写入调用方可设置 `MasterSpec::dbmd_originator` 与 `dbmd_product`，ADM 和 DAMF 读取器的转换入口则提供
+`with_dbmd_identity(originator, product)`。
+
 ```text
 $ mfadm adm result.wav
 1 programmes, 1 contents, 3 objects, 0 HOA packs; 4 object blocks, 10 DirectSpeakers blocks
@@ -348,7 +362,7 @@ film/master.atmos (home): 2 objects, 3 updates
 - **直接拒绝**：多个 programme、多个 bed、不完整或非 7.1.2 的 bed、极坐标对象、多声道 `Objects`、嵌套对象、
   HOA 等其他 `typeDefinition`、对象 block 之间有空隙或重叠，以及没有 `axml` / `chna` 的文件。
 - **帧率**：ADM 不带帧率，Logic 的 DBMD 帧率也不读回；输出默认 24 fps，用 `with_frame_rate`（或 `mfadm convert --fps`）指定。
-  DBMD 的创建者字段同样不读回，输出写本库自己的值。
+  DBMD 的创建者字段同样不读回，输出默认使用本库的值，可用 `with_dbmd_identity` 或上述 CLI 参数自定义。
 - **DAMF 装不下的**：DAMF 没有节目名字段。节目名只是描述信息，写 DAMF 时直接省略、不按损失处理，
   所以 ADM 转 DAMF 再转回时节目名回到默认值。`screenRef` 写 DAMF 时则按损失处理。
   反过来，DAMF 里延伸到音频结尾之后的 ramp 在 ADM 中被截在结尾，读回是截短的 ramp 与当时的插值位置。
@@ -372,7 +386,6 @@ film/master.atmos (home): 2 objects, 3 updates
 - ADM 读取只支持上面的 Atmos 子集；极坐标、HOA、多 bed 与嵌套对象不做转换。
 - 不做渲染、聚类或编解码；不导出 C ABI。
 - `mfadm` 不修改输入、不覆盖输出；转换的损失与写入一样按 `LossPolicy` 处理，默认拒绝。
-- 不在文件里伪造创建工具来源：即使某个外部检查器因此拒绝，也保留真实创建者（见下文）。
 
 ## 开发与验收
 
@@ -402,7 +415,7 @@ ADM 经 DAMF 再转回 ADM 逐字节一致，并覆盖只靠 CHNA 定义轨道�
 | 配置 | 独立验证 | 已识别的工具限制 |
 | --- | --- | --- |
 | Standard BW64 | EBU EAR | 本机的 Dolby Conversion Tool / atmos_info 要求 RIFF/RF64，不识别 BW64 |
-| Logic RF64 | Conversion Tool 转换（48/96 kHz，PCM 逐字节一致）、EAR | atmos_info 对自行生成的 RF64 做创建工具来源检查；库不会因此改写为 Dolby 创建者 |
+| Logic RF64 | Conversion Tool 转换（48/96 kHz，PCM 逐字节一致）、EAR | 默认创建来源会触发 Conversion Tool 提示与 atmos_info 的来源检查，可用 `--dbmd-originator` 自定义 |
 | DAMF home | Conversion Tool、atmos_info | — |
 | DAMF 3DoF | 较新的 atmos_info | Conversion Tool 2.1.2 的 DAMF 版本上限为 0.5 |
 

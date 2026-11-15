@@ -136,11 +136,30 @@ pub fn convert(
     policy: LossPolicy,
     frame_rate: Option<FrameRate>,
 ) -> Result<ConvertReport> {
+    convert_with_dbmd_identity(source, audio, targets, policy, frame_rate, None, None)
+}
+
+/// 转换母版，并按需覆盖所有 Logic 输出的 DBMD 创建来源与产品字段。
+/// 未指定的字段采用写入模型的默认值。
+pub fn convert_with_dbmd_identity(
+    source: &Path,
+    audio: Option<&Path>,
+    targets: &[Target],
+    policy: LossPolicy,
+    frame_rate: Option<FrameRate>,
+    originator: Option<&str>,
+    product: Option<&str>,
+) -> Result<ConvertReport> {
     let (spec, updates, conversion) = if is_wave(source)? {
         let mut reader = AdmReader::open(source, policy)?;
         if let Some(rate) = frame_rate {
             reader = reader.with_frame_rate(rate);
         }
+        let originator = originator
+            .unwrap_or(&reader.spec().dbmd_originator)
+            .to_owned();
+        let product = product.unwrap_or(&reader.spec().dbmd_product).to_owned();
+        reader = reader.with_dbmd_identity(originator, product);
         let input = match audio {
             Some(path) => reader.wave_audio(path)?,
             None => reader.audio()?,
@@ -155,6 +174,11 @@ pub fn convert(
             ));
         }
         let reader = DamfReader::open(source, policy)?;
+        let originator = originator
+            .unwrap_or(&reader.spec().dbmd_originator)
+            .to_owned();
+        let product = product.unwrap_or(&reader.spec().dbmd_product).to_owned();
+        let reader = reader.with_dbmd_identity(originator, product);
         let input = match audio {
             Some(path) => reader.wave_audio(path)?,
             None => reader.audio()?,

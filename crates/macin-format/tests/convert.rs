@@ -209,6 +209,140 @@ fn convert_arguments_are_checked_by_clap() {
     }
 }
 
+fn dbmd_identity(path: &Path) -> (String, String) {
+    let mut wav = macin_bwf::Reader::new(std::fs::File::open(path).unwrap()).unwrap();
+    let data = wav.metadata(*b"dbmd", 1 << 20).unwrap().unwrap();
+    let mut at = 4;
+    while data[at] != 0 {
+        let id = data[at];
+        let size = u16::from_le_bytes(data[at + 1..at + 3].try_into().unwrap());
+        let payload = &data[at + 3..at + 3 + usize::from(size)];
+        let checksum = data[at + 3 + usize::from(size)];
+        assert_eq!(
+            payload
+                .iter()
+                .fold(size as u8, |sum, byte| sum.wrapping_add(*byte))
+                .wrapping_add(checksum),
+            0
+        );
+        if id == 9 {
+            let text = |bytes: &[u8]| {
+                String::from_utf8(bytes.to_vec())
+                    .unwrap()
+                    .trim_end_matches('\0')
+                    .to_owned()
+            };
+            return (text(&payload[..32]), text(&payload[32..96]));
+        }
+        at += usize::from(size) + 4;
+    }
+    panic!("DBMD segment 9 missing");
+}
+
+#[test]
+fn convert_customizes_dbmd_from_adm_and_damf() {
+    let dir = Scratch::new();
+    let variants = [
+        (None, None),
+        (Some("Created using Dolby equipment".to_owned()), None),
+        (None, Some("Studio Export".to_owned())),
+        (Some("A".repeat(32)), Some("B".repeat(64))),
+        (Some(String::new()), Some(String::new())),
+    ];
+    for (source_index, source) in [adm(&dir.0), damf(&dir.0)].iter().enumerate() {
+        for (index, (originator, product)) in variants.iter().enumerate() {
+            let logic = dir.path(&format!("logic-{source_index}-{index}.wav"));
+            let standard = dir.path(&format!("standard-{source_index}-{index}.wav"));
+            let home = dir.path(&format!("home-{source_index}-{index}"));
+            let mut args = vec![
+                "convert".into(),
+                source.as_os_str().to_owned(),
+                to("logic", &logic),
+                to("standard", &standard),
+                to("home", &home),
+                "--allow-loss".into(),
+            ];
+            for (flag, value) in [
+                ("--dbmd-originator", originator),
+                ("--dbmd-product", product),
+            ] {
+                if let Some(value) = value {
+                    args.push(flag.into());
+                    args.push(value.into());
+                }
+            }
+            let args: Vec<_> = args.iter().map(|s| s.as_os_str()).collect();
+            let output = mfadm(&args);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                dbmd_identity(&logic),
+                (
+                    originator
+                        .as_deref()
+                        .unwrap_or("Created by MacinFormat")
+                        .to_owned(),
+                    product
+                        .as_deref()
+                        .unwrap_or("MacinFormat ADM Core")
+                        .to_owned(),
+                )
+            );
+            assert_eq!(
+                std::fs::read(&standard).unwrap(),
+                std::fs::read(dir.path(&format!("standard-{source_index}-0.wav"))).unwrap()
+            );
+            assert_eq!(
+                std::fs::read(home.join("master.atmos")).unwrap(),
+                std::fs::read(dir.path(&format!("home-{source_index}-0/master.atmos"))).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn dbmd_creator_arguments_validate_ascii_width_and_control_characters() {
+    for (flag, value) in [
+        ("--dbmd-originator", "A".repeat(33)),
+        ("--dbmd-originator", "创建工具".to_owned()),
+        ("--dbmd-originator", "first\nsecond".to_owned()),
+        ("--dbmd-product", "B".repeat(65)),
+        ("--dbmd-product", "产品".to_owned()),
+        ("--dbmd-product", "first\tsecond".to_owned()),
+    ] {
+        let output = mfadm(&[
+            "convert".as_ref(),
+            "missing.atmos".as_ref(),
+            "--to=logic=unused.wav".as_ref(),
+            flag.as_ref(),
+            value.as_ref(),
+        ]);
+        assert_eq!(output.status.code(), Some(2), "{flag} {value:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("ASCII"));
+    }
+}
+
+#[test]
+fn convert_help_explains_the_conversion_tool_originator_option() {
+    for help in ["--help", "-h"] {
+        let output = mfadm(&["convert".as_ref(), help.as_ref()]);
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        for expected in [
+            "--dbmd-originator",
+            "--dbmd-product",
+            "Created using Dolby equipment",
+            "Conversion Tool 2.1.2",
+            "input file is not Dolby Atmos",
+        ] {
+            assert!(text.contains(expected), "{expected:?} missing from {text}");
+        }
+    }
+}
+
 #[test]
 fn convert_reports_invalid_caf_layout_without_panicking() {
     let dir = Scratch::new();

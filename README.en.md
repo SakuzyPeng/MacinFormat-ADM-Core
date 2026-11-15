@@ -243,6 +243,21 @@ cargo install --locked --path crates/macin-format
 `chunks`, `info`, `adm` and `convert` take `--json` for machine-readable output. `adm` and `axml` read metadata within a
 budget, 256 MiB by default, adjustable with `--max-metadata <MiB>`. Failures exit with 1, usage errors with 2.
 
+`convert --dbmd-originator <TEXT>` and `--dbmd-product <TEXT>` customize the DBMD originator and product
+for every Logic output. They accept ASCII text without control characters, up to 32 and 64 bytes respectively.
+The defaults are `Created by MacinFormat` and `MacinFormat ADM Core`. Conversion Tool 2.1.2 reports
+`not created by Dolby approved software` and `input file is not Dolby Atmos` with the default Logic originator,
+even when conversion finishes with exit code 0. The following option removes those provenance messages in
+the tested version. `mfadm convert --help` includes the same guidance.
+
+```sh
+mfadm convert input.wav --to logic=output.wav \
+  --dbmd-originator "Created using Dolby equipment"
+```
+
+Rust writers can set `MasterSpec::dbmd_originator` and `dbmd_product`. ADM and DAMF readers provide
+`with_dbmd_identity(originator, product)` for conversion.
+
 ```text
 $ mfadm adm result.wav
 1 programmes, 1 contents, 3 objects, 0 HOA packs; 4 object blocks, 10 DirectSpeakers blocks
@@ -383,7 +398,7 @@ library writes, and the same shape from other tools.
   files without `axml` / `chna`.
 - **Frame rate**: ADM carries none, and a Logic source's DBMD frame rate is not read back; outputs default to
   24 fps, set with `with_frame_rate` (or `mfadm convert --fps`). DBMD's creator fields are not read back either;
-  outputs carry this library's own.
+  outputs default to this library's values, configurable with `with_dbmd_identity` or the CLI options above.
 - **What DAMF does not hold**: DAMF has no programme name. The name is descriptive, so writing DAMF leaves it
   out without reporting a loss, and ADM through DAMF and back returns the default name. `screenRef`, by
   contrast, is a loss when writing DAMF. The other way, a DAMF ramp that runs past the end of the audio
@@ -414,8 +429,6 @@ applies explicit degradations, each recorded as a `MappingDiagnostic`.
 - No rendering, clustering or coding; no C ABI.
 - `mfadm` never modifies an input or overwrites an output; conversion losses follow `LossPolicy` exactly as
   writing does, rejecting by default.
-- No faked creation tool provenance: the real creator is kept even when an external checker rejects the file
-  for it (see below).
 
 ## Development and acceptance
 
@@ -451,7 +464,7 @@ independent format acceptance.
 | Profile | Independent validation | Known tool limitations |
 | --- | --- | --- |
 | Standard BW64 | EBU EAR | The local Dolby Conversion Tool / atmos_info require RIFF/RF64 and do not recognise BW64 |
-| Logic RF64 | Conversion Tool conversion (48/96 kHz, PCM byte-identical), EAR | atmos_info checks creation tool provenance on self-generated RF64; the library does not rewrite the creator as Dolby to pass it |
+| Logic RF64 | Conversion Tool conversion (48/96 kHz, PCM byte-identical), EAR | The default originator triggers Conversion Tool messages and atmos_info provenance checks, configurable with `--dbmd-originator` |
 | DAMF home | Conversion Tool, atmos_info | — |
 | DAMF 3DoF | A newer atmos_info | Conversion Tool 2.1.2 supports DAMF up to 0.5 |
 

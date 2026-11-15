@@ -21,7 +21,7 @@ pub fn build_logic_dbmd(
 
     // EBU Tech 3285 Supplement 6 定义 segment 头、终止标记和校验和；7/9/10
     // 是 Logic 互操作配置所需的私有负载。这里只写项目夹具与结构判据已覆盖的
-    // 字段，不复制母版块，也不声明生成物来自任何厂商设备。
+    // 字段。创建来源与产品使用调用方提供的固定宽度 ASCII 文本。
     let mut ddplus = [0u8; 96];
     for (offset, value) in [
         (1usize, 0x47u8),
