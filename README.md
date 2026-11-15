@@ -36,7 +36,9 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 读回同一个模型�
 - **改写 ADM 且保留原文**：用 `Patch` 做语义修改，未触及的部分（包括未知扩展）原样回写。
 - **生成 ADM**：为 DirectSpeakers、HOA3 和 Binaural 渲染结果生成 AXML 与配套 `chna`。
 - **读写 WAVE 容器**：RIFF / RF64 / BW64 的流式读写、按帧跳转、`chna` / `bext` 等 chunk 的读取与编辑，
-  元数据按调用方给定的预算读取，打开文件时不分配未知 chunk。
+  元数据按调用方给定的预算读取，打开文件时不分配未知 chunk。`Writer::write_frames` 保持 libbw64 0.10.0 的量化
+  （乘 2^(b−1)−1、向零截断）；`write_frames_nearest` 与母版写入同一约定（乘 2^(b−1)、就近取整、中点远离零），
+  `read_frames` 读出的 16/24-bit 样本经它写回逐字节不变。
 - **写 Atmos 母版**：固定 7.1.2 bed 加最多 118 个对象，分块写入 PCM 和对象元数据更新，
   输出 Standard BW64、Logic RF64、DAMF home 或 DAMF 3DoF，完成后原子提交。
 - **一次写出多份**：`MultiWriter` 把同一个模型在一次写入里同时输出成 ADM 和 DAMF 等多种配置。
@@ -85,32 +87,52 @@ macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev 
 ### 读取一个 ADM BWF
 
 ```rust
-use macin_adm::{Document, Snapshot};
-use macin_bwf::Reader;
+use macin_adm::{Document, Snapshot, TrackUidDefinition};
+use macin_bwf::{Chna, Reader};
 use std::fs::File;
 
 fn inspect(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut wav = Reader::new(File::open(path)?)?;
-    let info = wav.info();
+    let rate = wav.info().format.sample_rate;
     // 元数据按调用方给定的预算读取。
     let axml = wav.metadata(*b"axml", 64 << 20)?.ok_or("没有 axml chunk")?;
-    let chna: Vec<(String, u16)> = wav
-        .chna()?
-        .map(|chna| {
-            chna.entries
-                .iter()
-                .map(|e| (String::from_utf8_lossy(&e.uid).into_owned(), e.track_index))
-                .collect()
-        })
-        .unwrap_or_default();
-    let doc = Document::parse(std::str::from_utf8(&axml)?).map_err(|e| e.message)?;
-    let scene = Snapshot::extract(&doc, info.format.sample_rate, &chna).map_err(|e| e.message)?;
+    // 导入侧解码：容忍末尾的预留记录；track index 0 表示未使用的条目。
+    let entries = match wav.metadata(*b"chna", 4 + 40 * u64::from(u16::MAX))? {
+        Some(data) => Chna::decode_import(&data)?.entries,
+        None => Vec::new(),
+    };
+    let text = |b: &[u8]| String::from_utf8_lossy(b).trim_end_matches([' ', '\0']).to_owned();
+    let mut channels = Vec::new();
+    let mut definitions = Vec::new();
+    for entry in entries.iter().filter(|e| e.track_index != 0) {
+        let uid = text(&entry.uid);
+        let mut format_id = text(&entry.track_format);
+        // CHNA 里引用 AC 时带 `_00` 填充。
+        if format_id.to_ascii_uppercase().starts_with("AC_") && format_id.ends_with("_00") {
+            format_id.truncate(format_id.len() - 3);
+        }
+        let pack = text(&entry.pack_format);
+        channels.push((uid.clone(), entry.track_index));
+        definitions.push(TrackUidDefinition {
+            uid,
+            format_id,
+            pack_id: (!pack.is_empty()).then_some(pack),
+        });
+    }
+    // AXML 里缺少的 audioTrackUID 由 CHNA 补全，两者冲突时报错。
+    let doc = Document::parse_with_track_uids(std::str::from_utf8(&axml)?, &definitions)
+        .map_err(|e| e.message)?;
+    let scene = Snapshot::extract(&doc, rate, &channels).map_err(|e| e.message)?;
     for object in &scene.objects {
         println!("{}：{} 条轨道", scene.strings[object.name as usize], object.tracks.len);
     }
     Ok(())
 }
 ```
+
+有的文件只在 CHNA 里定义 `audioTrackUID`，AXML 里并不写出来，所以示例把 CHNA 的轨道定义交给
+`parse_with_track_uids` 补全，而不是只用它做轨道号映射。`mfadm adm` 在此之外还会核对 CHNA 的轨道数与 `fmt `
+一致、记录没有被截断。
 
 `Snapshot` 是扁平表：名称和 ID 都是 `strings` 的下标，子元素用 `Span` 指向对应的表。`warnings` 同样是
 `strings` 的下标，说明哪些不支持的 `typeDefinition` 被跳过了。

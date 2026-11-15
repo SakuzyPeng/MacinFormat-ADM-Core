@@ -563,3 +563,147 @@ fn independent_extensible_pcm_and_float_bytes() {
     reader.read_frames(&mut decoded).unwrap();
     assert_eq!(samples.map(f32::to_bits), decoded.map(f32::to_bits));
 }
+
+fn decoded(payload: &[u8], width: usize) -> Vec<i32> {
+    payload
+        .chunks_exact(width)
+        .map(|raw| {
+            let mut value = [if raw[width - 1] & 128 != 0 { 255 } else { 0 }; 4];
+            value[..width].copy_from_slice(raw);
+            i32::from_le_bytes(value)
+        })
+        .collect()
+}
+
+#[test]
+fn nearest_quantization_uses_full_scale_and_rounds_ties_away_from_zero() {
+    let input = [
+        -1.0,
+        -0.5,
+        -1.0 / 8388608.0,
+        0.0,
+        1.0 / 8388608.0,
+        0.5,
+        1.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -2.0,
+    ];
+    for (sample_format, expected) in [
+        (
+            SampleFormat::Pcm16,
+            vec![-32768, -16384, 0, 0, 0, 16384, 32767, 32767, -32768, -32768],
+        ),
+        (
+            SampleFormat::Pcm24,
+            vec![
+                -8388608, -4194304, -1, 0, 1, 4194304, 8388607, 8388607, -8388608, -8388608,
+            ],
+        ),
+        (
+            SampleFormat::Pcm32,
+            vec![
+                i32::MIN,
+                -1073741824,
+                -256,
+                0,
+                256,
+                1073741824,
+                i32::MAX,
+                i32::MAX,
+                i32::MIN,
+                i32::MIN,
+            ],
+        ),
+    ] {
+        let mut writer = Writer::new(
+            Cursor::new(Vec::new()),
+            format(sample_format, 1),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        writer.write_frames_nearest(&input).unwrap();
+        assert!(writer.write_frames_nearest(&[f32::NAN]).is_err());
+        let data = writer.finish().unwrap().into_inner();
+        let width = usize::from(sample_format.bits() / 8);
+        assert_eq!(
+            decoded(data_payload(&data), width),
+            expected,
+            "{sample_format:?}"
+        );
+    }
+    // Ties: 0.5, 1.5 and 2.5 code steps go away from zero, not to even.
+    let step = 1.0 / 32768.0;
+    let ties = [0.5 * step, 1.5 * step, 2.5 * step, -0.5 * step, -2.5 * step];
+    let mut writer = Writer::new(
+        Cursor::new(Vec::new()),
+        format(SampleFormat::Pcm16, 1),
+        WriterOptions::default(),
+    )
+    .unwrap();
+    writer.write_frames_nearest(&ties).unwrap();
+    let data = writer.finish().unwrap().into_inner();
+    assert_eq!(decoded(data_payload(&data), 2), [1, 2, 3, -1, -3]);
+}
+
+#[test]
+fn nearest_quantization_writes_back_what_read_frames_returned() {
+    for (bits, sample_format) in [(16, SampleFormat::Pcm16), (24, SampleFormat::Pcm24)] {
+        let codes = sample_values(bits, 65536);
+        let source = fixture(Container::Riff, bits, 2, &codes);
+        let mut reader = Reader::new(Cursor::new(source)).unwrap();
+        let mut samples = vec![0.0; codes.len()];
+        reader.read_frames(&mut samples).unwrap();
+        let mut writer = Writer::new(
+            Cursor::new(Vec::new()),
+            format(sample_format, 2),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        for block in samples.chunks(1000) {
+            writer.write_frames_nearest(block).unwrap();
+        }
+        let data = writer.finish().unwrap().into_inner();
+        assert_eq!(
+            decoded(data_payload(&data), usize::from(bits / 8)),
+            codes,
+            "{bits}-bit"
+        );
+
+        // The libbw64-compatible path is kept as is, and is not a round trip.
+        let mut writer = Writer::new(
+            Cursor::new(Vec::new()),
+            format(sample_format, 2),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        writer.write_frames(&samples).unwrap();
+        let data = writer.finish().unwrap().into_inner();
+        assert_ne!(
+            decoded(data_payload(&data), usize::from(bits / 8)),
+            codes,
+            "{bits}-bit"
+        );
+    }
+}
+
+#[test]
+fn nearest_quantization_leaves_float_output_unchanged() {
+    let input = [-2.0, -1.0, 0.25, 1.0, 3.5];
+    let mut outputs = Vec::new();
+    for nearest in [false, true] {
+        let mut writer = Writer::new(
+            Cursor::new(Vec::new()),
+            format(SampleFormat::Float32, 1),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        if nearest {
+            writer.write_frames_nearest(&input).unwrap();
+        } else {
+            writer.write_frames(&input).unwrap();
+        }
+        outputs.push(writer.finish().unwrap().into_inner());
+    }
+    assert_eq!(outputs[0], outputs[1]);
+}

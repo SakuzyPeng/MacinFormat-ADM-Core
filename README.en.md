@@ -41,7 +41,9 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 - **Generate ADM**: produce AXML and the matching `chna` for DirectSpeakers, HOA3 and Binaural render output.
 - **Read and write WAVE containers**: streaming RIFF / RF64 / BW64 I/O, frame seeking, and reading and
   editing chunks such as `chna` / `bext`. Metadata is read within a budget the caller supplies, and opening
-  a file never allocates unknown chunks.
+  a file never allocates unknown chunks. `Writer::write_frames` keeps libbw64 0.10.0's quantisation (scale by
+  2^(b−1)−1, truncate toward zero); `write_frames_nearest` follows the master writer (scale by 2^(b−1), round to
+  nearest, ties away from zero), so 16/24-bit samples from `read_frames` are written back byte for byte.
 - **Write Atmos masters**: a fixed 7.1.2 bed plus up to 118 objects, with PCM and object metadata updates
   written block by block, output as Standard BW64, Logic RF64, DAMF home or DAMF 3DoF, and committed
   atomically on completion.
@@ -95,32 +97,53 @@ steps are in [crates.io release preparation](docs/CRATES_IO_RELEASE.md) (Chinese
 ### Reading an ADM BWF
 
 ```rust
-use macin_adm::{Document, Snapshot};
-use macin_bwf::Reader;
+use macin_adm::{Document, Snapshot, TrackUidDefinition};
+use macin_bwf::{Chna, Reader};
 use std::fs::File;
 
 fn inspect(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut wav = Reader::new(File::open(path)?)?;
-    let info = wav.info();
+    let rate = wav.info().format.sample_rate;
     // Metadata is read within a budget the caller supplies.
     let axml = wav.metadata(*b"axml", 64 << 20)?.ok_or("no axml chunk")?;
-    let chna: Vec<(String, u16)> = wav
-        .chna()?
-        .map(|chna| {
-            chna.entries
-                .iter()
-                .map(|e| (String::from_utf8_lossy(&e.uid).into_owned(), e.track_index))
-                .collect()
-        })
-        .unwrap_or_default();
-    let doc = Document::parse(std::str::from_utf8(&axml)?).map_err(|e| e.message)?;
-    let scene = Snapshot::extract(&doc, info.format.sample_rate, &chna).map_err(|e| e.message)?;
+    // Import-side decoding: reserved records at the end are tolerated; track index 0 marks an unused entry.
+    let entries = match wav.metadata(*b"chna", 4 + 40 * u64::from(u16::MAX))? {
+        Some(data) => Chna::decode_import(&data)?.entries,
+        None => Vec::new(),
+    };
+    let text = |b: &[u8]| String::from_utf8_lossy(b).trim_end_matches([' ', '\0']).to_owned();
+    let mut channels = Vec::new();
+    let mut definitions = Vec::new();
+    for entry in entries.iter().filter(|e| e.track_index != 0) {
+        let uid = text(&entry.uid);
+        let mut format_id = text(&entry.track_format);
+        // CHNA spells an AC reference with `_00` padding.
+        if format_id.to_ascii_uppercase().starts_with("AC_") && format_id.ends_with("_00") {
+            format_id.truncate(format_id.len() - 3);
+        }
+        let pack = text(&entry.pack_format);
+        channels.push((uid.clone(), entry.track_index));
+        definitions.push(TrackUidDefinition {
+            uid,
+            format_id,
+            pack_id: (!pack.is_empty()).then_some(pack),
+        });
+    }
+    // CHNA fills in any audioTrackUID the AXML leaves out; a conflict between the two is an error.
+    let doc = Document::parse_with_track_uids(std::str::from_utf8(&axml)?, &definitions)
+        .map_err(|e| e.message)?;
+    let scene = Snapshot::extract(&doc, rate, &channels).map_err(|e| e.message)?;
     for object in &scene.objects {
         println!("{}: {} tracks", scene.strings[object.name as usize], object.tracks.len);
     }
     Ok(())
 }
 ```
+
+Some files define `audioTrackUID`s only in CHNA and leave them out of the AXML, so the example hands CHNA's
+track definitions to `parse_with_track_uids` to fill them in, rather than using CHNA only to map track
+numbers. `mfadm adm` additionally checks that CHNA's track count matches `fmt ` and that no record is
+truncated.
 
 `Snapshot` is a set of flat tables: names and IDs are indices into `strings`, and child elements are `Span`s
 into the corresponding table. `warnings` are `strings` indices too, saying which unsupported

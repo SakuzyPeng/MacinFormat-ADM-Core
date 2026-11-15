@@ -138,7 +138,22 @@ impl<W: Write + Seek> Writer<W> {
     pub fn format(&self) -> Format {
         self.format
     }
+    /// Encode normalized samples, preserving libbw64 0.10.0 for integer PCM: samples are clipped to
+    /// ±1, scaled by `2^(bits-1) - 1` and truncated toward zero, so `-1.0` becomes `-(2^(bits-1) - 1)`.
+    /// That is not the inverse of [`Reader::read_frames`](crate::Reader::read_frames), which divides by
+    /// `2^(bits-1)`; use [`Self::write_frames_nearest`] when samples read back must survive the trip.
     pub fn write_frames(&mut self, samples: &[f32]) -> Result<u64> {
+        self.write_samples(samples, Quantization::Libbw64)
+    }
+    /// Encode normalized samples the way `macin-atmos` masters are quantised and `read_frames`
+    /// decodes: integer PCM is clipped to ±1, scaled by `2^(bits-1)`, rounded to nearest with ties
+    /// away from zero, and saturated, so `-1.0` is the exact negative endpoint and `+1.0` the
+    /// largest positive code. Samples `read_frames` returned from 16- and 24-bit PCM are written
+    /// back unchanged. Float32 output is identical to [`Self::write_frames`].
+    pub fn write_frames_nearest(&mut self, samples: &[f32]) -> Result<u64> {
+        self.write_samples(samples, Quantization::Nearest)
+    }
+    fn write_samples(&mut self, samples: &[f32], quantization: Quantization) -> Result<u64> {
         if self.failed {
             return Err(Error::io("WAVE writer 已因 I/O 错误失效"));
         }
@@ -171,13 +186,15 @@ impl<W: Write + Seek> Writer<W> {
             if self.format.sample_format == SampleFormat::Float32 {
                 raw.copy_from_slice(&sample.to_le_bytes());
             } else {
-                // Preserve libbw64 0.10.0: f32 clipping, f64 scale, truncate toward zero.
-                let maximum = match self.format.sample_format {
-                    SampleFormat::Pcm16 => 32767.0,
-                    SampleFormat::Pcm24 => 8388607.0,
-                    _ => 2147483647.0,
+                let full = f64::from(1u32 << (self.format.sample_format.bits() - 1));
+                let clipped = f64::from(sample.clamp(-1.0, 1.0));
+                let value = match quantization {
+                    // Preserve libbw64 0.10.0: f32 clipping, f64 scale, truncate toward zero.
+                    Quantization::Libbw64 => (clipped * (full - 1.0)) as i32,
+                    Quantization::Nearest => {
+                        (clipped * full).round().clamp(-full, full - 1.0) as i32
+                    }
                 };
-                let value = (f64::from(sample.clamp(-1.0, 1.0)) * maximum) as i32;
                 raw.copy_from_slice(&value.to_le_bytes()[..width]);
             }
         }
@@ -362,4 +379,10 @@ pub fn create_file_writer(
     .inspect_err(|_| {
         let _ = std::fs::remove_file(path);
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quantization {
+    Libbw64,
+    Nearest,
 }
