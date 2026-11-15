@@ -14,7 +14,7 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 和 ADM BWF 读回同�
 ## 目录
 
 - [能用它做什么](#能用它做什么)
-- [三个 crate](#三个-crate)
+- [四个 crate](#四个-crate)
 - [获取](#获取)
 - [快速上手](#快速上手)
 - [命令行工具 mfadm](#命令行工具-mfadm)
@@ -47,19 +47,20 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 和 ADM BWF 读回同�
   转成任意配置（ADM 转 DAMF、DAMF 转 ADM、同类配置互转）；音频也可以换成一个 WAV，即“WAV 加元数据”写母版。
 - **命令行**：`mfadm` 列出 chunk、音频格式、`chna` 和 ADM 摘要，并能做 DAMF 转换，可输出 JSON。
 
-## 三个 crate
+## 四个 crate
 
 | crate | 入口 | 负责 |
 | --- | --- | --- |
 | `macin-adm` | `Document`、`Snapshot`、`Patch`、`generate` | ADM XML、引用解析、Objects/DirectSpeakers/HOA 投影、生成与保留原文的回写；按 `Snapshot` 节点号只读访问原始元素 |
 | `macin-bwf` | `Reader`、`ChunkReader`、`Writer`、`Chna` | RIFF/RF64/BW64、PCM 与容器编辑；不解释 ADM XML |
 | `macin-atmos` | `MasterSpec`、`MasterWriter`、`MultiWriter`；`damf::DamfReader`、`adm::AdmReader`（`read` feature） | 来源无关的 ADM BWF / DAMF 母版写入，以及 DAMF / ADM 读取与转换；依赖前两者 |
+| `macin-format`（不发布） | 命令行工具 `mfadm` | 检查与转换的命令行外壳；打开 `macin-atmos` 的 `read` |
 
-三者都禁止 unsafe（`unsafe_code = "forbid"`），依赖只有 `quick-xml`、`libm` 和 `renamore`，版本全部锁定。
+四个 crate 都禁止 unsafe（`unsafe_code = "forbid"`）。三个库的依赖只有 `quick-xml`、`libm` 和 `renamore`，版本全部锁定。
 两个读取器放在默认关闭的 `read` feature 后面。DAMF 读取需要 YAML 解析，只有打开它才会引入 `saphyr-parser`
 （同样锁定版本）；ADM 读取不需要额外依赖，但与 DAMF 共用同一套转换流程。只写母版的消费方依赖图不变。
 
-另有不发布的 `macin-format`，提供命令行工具 [`mfadm`](#命令行工具-mfadm)；它额外依赖 `clap` 和 `serde_json`，
+`macin-format` 只提供命令行工具 [`mfadm`](#命令行工具-mfadm)，不上传 crates.io；它额外依赖 `clap` 和 `serde_json`，
 这些依赖不会进入三个库。
 
 ## 获取
@@ -80,7 +81,7 @@ macin-bwf = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = 
 macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>", features = ["read"] }
 ```
 
-三个 crate 已准备 `0.1.0` 的包元数据，**尚未上传 crates.io**；上传步骤见
+三个库已准备 `0.1.0` 的包元数据，**尚未上传 crates.io**；上传步骤见
 [crates.io 发布准备](docs/CRATES_IO_RELEASE.md)。
 
 ## 快速上手
@@ -206,6 +207,25 @@ fn convert() -> Result<()> {
     for loss in conversion.read.iter().chain(&conversion.outputs[0].diagnostics) {
         eprintln!("{:?} {}: {}", loss.track, loss.field, loss.message);
     }
+    Ok(())
+}
+```
+
+### 把 ADM 转成 DAMF
+
+```rust
+use macin_atmos::adm::AdmReader;
+use macin_atmos::{FrameRate, LossPolicy, Profile, Result, Target};
+
+fn adm_to_damf() -> Result<()> {
+    // ADM 不带帧率，输出默认 24 fps，需要时自己指定。
+    let reader = AdmReader::open("result.wav", LossPolicy::Reject)?.with_frame_rate(FrameRate::Fps25);
+    let targets = [
+        Target { path: "from-adm-home".into(), profile: Profile::DamfHome },
+        Target { path: "from-adm-3dof".into(), profile: Profile::DamfThreeDof },
+    ];
+    let conversion = reader.convert(reader.audio()?, &targets)?;
+    assert_eq!(conversion.outputs.len(), 2);
     Ok(())
 }
 ```

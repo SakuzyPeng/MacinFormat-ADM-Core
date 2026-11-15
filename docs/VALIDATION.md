@@ -10,7 +10,7 @@
 
 ## DAMF 读取、转换与多份输出
 
-日期：2026-11-14，Linux x64 / Rust 1.98；macOS arm64 与 Windows x64 待 CI。
+日期：2026-11-14，Linux x64 / Rust 1.98；macOS 与 Windows 由 GitHub Actions 的 macos-15 / windows-2025 矩阵验证（见下）。
 
 - workspace（`macin-atmos` 经 `macin-format` 打开 `read`）：fmt、Clippy（所有 target、警告视为错误）、82 项测试通过，1 项历史 4 GiB 测试保持 ignored。
 - 不开 `read` 的 `macin-atmos`：Clippy 与 17 项测试通过；依赖图与改动前相同，不含 `saphyr-parser`。CI 增加了这一配置的独立步骤。
@@ -31,7 +31,7 @@
 
 ## ADM 读取与转换
 
-日期：2026-11-15，Linux x64 / Rust 1.98；macOS arm64 与 Windows x64 待 CI。
+日期：2026-11-15，Linux x64 / Rust 1.98；macOS 与 Windows 由 GitHub Actions 的 macos-15 / windows-2025 矩阵验证（见下）。
 
 - workspace：fmt、Clippy（所有 target、警告视为错误）与全部测试通过；不开 `read` 的 `macin-atmos` 单独检查通过。
 - `macin-adm` 新增按节点号只读访问原始元素的接口，不改动 `#[repr(C)]` 记录；越界节点号返回空值而不 panic。
@@ -42,6 +42,13 @@
 - 预读过的音频与来自 DAMF 读取器的音频，转换结果与直接转换逐字节相同。
 - 规模：118 个对象、11.8 万个事件、10 秒的 ADM（AXML 57.8 MB），转 DAMF 用时 2.2 秒，峰值内存 642 MiB，约为 AXML 大小的 11 倍。同一 DAMF 经 ADM 再转回 DAMF，清单与音频逐字节一致；元数据里每个对象有一个事件不同，原因是其 ramp 延伸到音频结尾之后，ADM 只记录到结尾为止。
 - 尚未进行：读取其他工具实际产出的 ADM BWF。上面的第三方写法是手写的。
+
+## 跨平台 CI
+
+GitHub Actions run 43717764695（代码提交 18031c8064f5dabe625be8b0b64785aeecd9dbdb，2026-11-15）在 macos-15 与
+windows-2025 上全部通过：fmt、workspace Clippy（所有 target、警告视为错误）、workspace 测试、互操作检查器的
+Python 回归，以及不开 `read` 的 `macin-atmos` Clippy 与测试。这次运行覆盖上面 DAMF 读取、多份输出、ADM 读取
+各节的代码及其后续修正。
 
 ## 外部互操作
 

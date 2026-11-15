@@ -17,7 +17,7 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 ## Contents
 
 - [What it does](#what-it-does)
-- [The three crates](#the-three-crates)
+- [The four crates](#the-four-crates)
 - [Getting it](#getting-it)
 - [Quickstart](#quickstart)
 - [The mfadm command](#the-mfadm-command)
@@ -56,21 +56,22 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 - **From the command line**: `mfadm` lists chunks, the audio format, `chna` and an ADM summary, and converts
   DAMF, with JSON output.
 
-## The three crates
+## The four crates
 
 | Crate | Entry points | Responsibility |
 | --- | --- | --- |
 | `macin-adm` | `Document`, `Snapshot`, `Patch`, `generate` | ADM XML, reference resolution, Objects/DirectSpeakers/HOA projection, generation and source-preserving write-back; read-only access to the literal elements by `Snapshot` node number |
 | `macin-bwf` | `Reader`, `ChunkReader`, `Writer`, `Chna` | RIFF/RF64/BW64, PCM and container edits; does not interpret ADM XML |
 | `macin-atmos` | `MasterSpec`, `MasterWriter`, `MultiWriter`; `damf::DamfReader`, `adm::AdmReader` (feature `read`) | Source-agnostic ADM BWF / DAMF master writing, and DAMF / ADM reading and conversion; builds on the other two |
+| `macin-format` (unpublished) | the `mfadm` command | The command-line shell for inspection and conversion; turns on `macin-atmos`'s `read` |
 
-All three forbid unsafe code (`unsafe_code = "forbid"`). Their only dependencies are `quick-xml`, `libm` and
-`renamore`, each pinned to an exact version. Both readers sit behind the `read` feature, off by default.
+All four forbid unsafe code (`unsafe_code = "forbid"`). The three libraries' only dependencies are
+`quick-xml`, `libm` and `renamore`, each pinned to an exact version. Both readers sit behind the `read` feature, off by default.
 Reading DAMF needs a YAML parser, and only turning the feature on brings in `saphyr-parser` (pinned as well);
 reading ADM needs nothing more, but shares the DAMF conversion path. Consumers that only write keep their
 dependency graph.
 
-A fourth, unpublished crate, `macin-format`, provides the [`mfadm`](#the-mfadm-command) command;
+`macin-format` only provides the [`mfadm`](#the-mfadm-command) command and is not uploaded to crates.io;
 its extra dependencies, `clap` and `serde_json`, never reach the three libraries.
 
 ## Getting it
@@ -91,7 +92,7 @@ Turn on `read` to read or convert DAMF:
 macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>", features = ["read"] }
 ```
 
-The three crates carry `0.1.0` package metadata but **have not been uploaded to crates.io yet**; the upload
+The three libraries carry `0.1.0` package metadata but **have not been uploaded to crates.io yet**; the upload
 steps are in [crates.io release preparation](docs/CRATES_IO_RELEASE.md) (Chinese).
 
 ## Quickstart
@@ -219,6 +220,25 @@ fn convert() -> Result<()> {
     for loss in conversion.read.iter().chain(&conversion.outputs[0].diagnostics) {
         eprintln!("{:?} {}: {}", loss.track, loss.field, loss.message);
     }
+    Ok(())
+}
+```
+
+### Converting ADM to DAMF
+
+```rust
+use macin_atmos::adm::AdmReader;
+use macin_atmos::{FrameRate, LossPolicy, Profile, Result, Target};
+
+fn adm_to_damf() -> Result<()> {
+    // ADM carries no frame rate; outputs default to 24 fps, so set it when it matters.
+    let reader = AdmReader::open("result.wav", LossPolicy::Reject)?.with_frame_rate(FrameRate::Fps25);
+    let targets = [
+        Target { path: "from-adm-home".into(), profile: Profile::DamfHome },
+        Target { path: "from-adm-3dof".into(), profile: Profile::DamfThreeDof },
+    ];
+    let conversion = reader.convert(reader.audio()?, &targets)?;
+    assert_eq!(conversion.outputs.len(), 2);
     Ok(())
 }
 ```
