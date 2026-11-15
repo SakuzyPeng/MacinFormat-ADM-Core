@@ -349,3 +349,63 @@ fn convert_reads_adm_as_well_as_damf() {
         Some(2)
     );
 }
+
+#[test]
+fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
+    let dir = Scratch::new();
+    let source = adm(&dir.0);
+    let audio = dir.path("longer.wav");
+    let mut writer = macin_bwf::Writer::new(
+        std::fs::File::create(&audio).unwrap(),
+        macin_bwf::Format {
+            channels: 11,
+            sample_rate: 48_000,
+            sample_format: macin_bwf::SampleFormat::Pcm24,
+            channel_mask: None,
+        },
+        macin_bwf::WriterOptions::default(),
+    )
+    .unwrap();
+    writer.write_pcm_bytes(&vec![0; 9600 * 11 * 3]).unwrap();
+    writer.finish().unwrap();
+    let damf_path = dir.path("damf");
+    let adm_path = dir.path("longer-adm.wav");
+    let args = [
+        "convert".as_ref(),
+        source.as_os_str(),
+        "--audio".as_ref(),
+        audio.as_os_str(),
+        &to("home", &damf_path),
+        &to("standard", &adm_path),
+        "--json".as_ref(),
+    ];
+    let rejected = mfadm(&args);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("bed_timing"));
+    assert!(!damf_path.exists() && !adm_path.exists());
+    let mut allowed = args.to_vec();
+    allowed.push("--allow-loss".as_ref());
+    let output = mfadm(&allowed);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["updates"], 2);
+    assert_eq!(report["read_losses"][0]["field"], "bed_timing");
+    assert_eq!(report["outputs"][0]["frames"], 9600);
+    let damf = macin_atmos::damf::DamfReader::open(
+        damf_path.join("master.atmos"),
+        macin_atmos::LossPolicy::Reject,
+    )
+    .unwrap();
+    let last = damf.updates().unwrap().last().unwrap().unwrap();
+    assert_eq!((last.sample, last.patch.active), (4800, Some(false)));
+    let adm = macin_atmos::adm::AdmReader::open(adm_path, macin_atmos::LossPolicy::Reject).unwrap();
+    assert!(
+        adm.updates()
+            .iter()
+            .any(|u| u.sample == 4800 && u.patch.gain == Some(macin_atmos::Gain::Linear(0.)))
+    );
+}

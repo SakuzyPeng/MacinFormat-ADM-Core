@@ -325,23 +325,27 @@ film/master.atmos (home): 2 objects, 3 updates
 支持的是 Atmos 子集：本库写出的结构，以及其他工具写出的同类结构。
 
 - **支持的结构**：一个 programme；至多一个 7.1.2 `DirectSpeakers` bed，声道用 `RC_L`…`RC_Rts`（或不带 `RC_`）
-  标记，顺序不限；任意个单轨、Cartesian 坐标的 `Objects`；轨道定义可以只写在 CHNA 里。Logic RF64（带 DBMD）读成
+  标记，顺序不限；任意个单轨、Cartesian 坐标的 `Objects`，省略 Z 时取 0，布尔字段接受 `0` / `1` 和 `false` / `true`；
+  轨道定义可以只写在 CHNA 里。Logic RF64（带 DBMD）读成
   `Logic`，其余读成 `Standard`。
 - **数值精度**：位置、尺寸等从文档原文按 `f64` 解析，而不是取 `Snapshot` 里的 `f32` 投影，所以本库写出的
   ADM 读回再写，Standard 与原文件逐字节一致。Logic 的 DBMD 帧率和创建者字段不读回，按同样的帧率与字段写出时
   也逐字节一致。
 - **时间线**：每个 block 自成一体，没写的元素取缺省值。block 起点成为一次更新，只包含与前一个 block 不同的字段；
   `jumpPosition` 为 1 时 ramp 取 `interpolationLength`（不超过 block 长度），没写 `jumpPosition` 时在整个 block 内插值。
-  对象的 `start` / `duration` 变成激活与停用的更新。对象级 `gain` 乘进每个 block，`mute` 读成静音。
+  对象的 `start` / `duration` 变成激活与停用的更新，结束点还受最后一个有限 block 的结束时间约束。
+  换用更长的 WAV 也保留停用边界；`updates_for_frames` 按实际音频长度提供更新，`updates` 返回原文件长度下的更新。
+  对象级 `gain` 乘进每个 block，`mute` 读成静音。
   ADM 没有 active 标志：写入器把不活动的对象写成 gain 0，读回就是静音增益。
 - **ID 与声道**：对象按轨道号排序，`TrackId` 是对象在文件里的轨道号（从 1 起）；`wave_audio` 用 WAV 代替音频时，
   第 n 个声道对应第 n + 1 条轨道。没有 bed 的文件写出一组静音 bed。
 - **按损失处理**：`zoneExclusion` 等没有映射的 block 元素（`unknown_field`）、非零 `diffuse`、`objectDivergence`、
   `headLocked`（`head_tracking`）、带 `maxDistance` 的 `channelLock`、对象的 `positionOffset`、`dialogue`、
   非 10 的对象级 `importance`、`interact` / `disableDucking`，programme / content 的响度、语言、标签和对白分类，
-  非零的 programme 起点，以及 bed 声道上的增益、`headLocked` 和不覆盖整个节目的 bed。
+  非零的 programme 起点，以及 bed 声道上的增益、非默认优先级、`headLocked`、位置边界和屏幕边缘锁定。
+  bed 各声道未连续覆盖整个节目、延长替换音频超出 bed 的有限结束点，以及声道的频率限制同样按损失处理。
 - **直接拒绝**：多个 programme、多个 bed、不完整或非 7.1.2 的 bed、极坐标对象、多声道 `Objects`、嵌套对象、
-  HOA 等其他 `typeDefinition`、block 之间有空隙或重叠，以及没有 `axml` / `chna` 的文件。
+  HOA 等其他 `typeDefinition`、对象 block 之间有空隙或重叠，以及没有 `axml` / `chna` 的文件。
 - **帧率**：ADM 不带帧率，Logic 的 DBMD 帧率也不读回；输出默认 24 fps，用 `with_frame_rate`（或 `mfadm convert --fps`）指定。
   DBMD 的创建者字段同样不读回，输出写本库自己的值。
 - **DAMF 装不下的**：DAMF 没有节目名字段。节目名只是描述信息，写 DAMF 时直接省略、不按损失处理，

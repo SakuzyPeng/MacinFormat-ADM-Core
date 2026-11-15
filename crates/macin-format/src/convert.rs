@@ -145,12 +145,9 @@ pub fn convert(
             Some(path) => reader.wave_audio(path)?,
             None => reader.audio()?,
         };
+        let updates = reader.updates_for_frames(input.frames()).count() as u64;
         let conversion = reader.convert(input, targets)?;
-        (
-            reader.spec().clone(),
-            reader.updates().len() as u64,
-            conversion,
-        )
+        (reader.spec().clone(), updates, conversion)
     } else {
         if frame_rate.is_some() {
             return Err(Error::msg(

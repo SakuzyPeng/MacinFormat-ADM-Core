@@ -43,6 +43,12 @@ fn snapshot_nodes_lead_back_to_the_literal_elements() {
     // Common definitions are reachable too.
     let common = doc.element_by_id("AP_00010002").unwrap();
     assert_eq!(doc.element_name(common), Some("audioPackFormat"));
+    assert_eq!(
+        doc.track_channels("atu_00000001"),
+        vec![doc.element_by_id("AC_00031001").unwrap()]
+    );
+    assert!(doc.track_channels("ATU_ffffffff").is_empty());
+    assert!(doc.track_channels("AO_1001").is_empty());
 }
 
 #[test]

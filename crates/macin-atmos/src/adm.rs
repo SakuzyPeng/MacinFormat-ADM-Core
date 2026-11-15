@@ -12,7 +12,7 @@
 use crate::damf::{AudioSource, Conversion, Input, write_conversion};
 use crate::*;
 use macin_adm::records::{NONE, Span};
-use macin_adm::{Document, Snapshot, TrackUidDefinition};
+use macin_adm::{Document, Snapshot, TrackUidDefinition, parse_boolean};
 use macin_bwf::{Chna, Container, Reader};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -31,6 +31,9 @@ pub struct AdmReader {
     /// The source channel (0-based) feeding each output channel: ten bed slots, then objects.
     channels: Vec<Option<u32>>,
     updates: Vec<ObjectUpdate>,
+    /// 有限结束边界独立于原音频长度保存，用于转换时提交停用事件。
+    object_ends: Vec<(TrackId, u64)>,
+    bed_end: Option<u64>,
     last_sample: Option<u64>,
     frames: u64,
     diagnostics: Vec<MappingDiagnostic>,
@@ -170,7 +173,7 @@ fn block_state(
             "width" => size[0] = number(text, "width").map_err(at)?,
             "depth" => size[1] = number(text, "depth").map_err(at)?,
             "height" => size[2] = number(text, "height").map_err(at)?,
-            "cartesian" if text.trim() != "1" => {
+            "cartesian" if parse_boolean(text).map_err(adm_error).map_err(at)? == 0 => {
                 return Err(at(unsupported("object blocks must be Cartesian")));
             }
             "gain" => {
@@ -184,7 +187,7 @@ fn block_state(
                 };
             }
             "channelLock" => {
-                state.snap = text.trim() == "1";
+                state.snap = parse_boolean(text).map_err(adm_error).map_err(at)? != 0;
                 if doc.element_attribute(child, "maxDistance").is_some() {
                     losses.report(
                         Some(track),
@@ -194,7 +197,9 @@ fn block_state(
                     )?;
                 }
             }
-            "screenRef" => state.screen_ref = text.trim() == "1",
+            "screenRef" => {
+                state.screen_ref = parse_boolean(text).map_err(adm_error).map_err(at)? != 0;
+            }
             "importance" => {
                 let value: u8 = text
                     .trim()
@@ -220,7 +225,7 @@ fn block_state(
                     "objectDivergence has no mapping".into(),
                 )?;
             }
-            "headLocked" if text.trim() == "1" => {
+            "headLocked" if parse_boolean(text).map_err(adm_error).map_err(at)? != 0 => {
                 losses.report(
                     Some(track),
                     Some(sample),
@@ -237,12 +242,10 @@ fn block_state(
             )?,
         }
     }
-    let [Some(x), Some(y), Some(z)] = position else {
-        return Err(at(Error::invalid(
-            "object block needs X, Y and Z positions",
-        )));
+    let [Some(x), Some(y), z] = position else {
+        return Err(at(Error::invalid("object block needs X and Y positions")));
     };
-    state.position = [x, y, z];
+    state.position = [x, y, z.unwrap_or(0.)];
     state.extent = match size {
         [0., 0., 0.] => None,
         [w, d, h] if w == d && d == h => Some(Extent::Uniform(w)),
@@ -289,6 +292,31 @@ impl Scene<'_> {
         self.scene.indices[span.offset..span.offset + span.len]
             .iter()
             .map(|&i| self.text(i))
+    }
+    fn channel_losses(
+        &self,
+        uid: u32,
+        track: Option<TrackId>,
+        losses: &mut Losses<'_>,
+    ) -> Result<()> {
+        for channel in self.doc.track_channels(self.text(uid)) {
+            for child in self.doc.element_children(channel) {
+                let name = self.doc.element_name(child).unwrap_or_default();
+                if name != "audioBlockFormat" {
+                    let field = match name {
+                        "frequency" | "channelFrequency" => "channel_frequency",
+                        _ => "unknown_field",
+                    };
+                    losses.report(
+                        track,
+                        None,
+                        field,
+                        format!("Channel {} element {name:?} has no mapping", self.text(uid)),
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -359,6 +387,8 @@ impl AdmReader {
             path: path.to_owned(),
             channels: vec![None; BED_CHANNELS],
             updates: Vec::new(),
+            object_ends: Vec::new(),
+            bed_end: None,
             last_sample: None,
             frames: info.frames,
             diagnostics: Vec::new(),
@@ -607,23 +637,41 @@ impl AdmReader {
             )?;
         }
         let tracks = &scene.tracks[object.tracks.offset..object.tracks.offset + object.tracks.len];
+        self.bed_end = Some(object.end);
         for track in tracks {
-            let blocks = &scene.direct_blocks
-                [track.ds_blocks.offset..track.ds_blocks.offset + track.ds_blocks.len];
-            let first = &blocks[0];
+            s.channel_losses(track.uid, None, losses)?;
+            let mut blocks: Vec<_> = scene.direct_blocks
+                [track.ds_blocks.offset..track.ds_blocks.offset + track.ds_blocks.len]
+                .iter()
+                .collect();
+            blocks.sort_by_key(|b| b.start);
+            let first = blocks[0];
             let label = s.list(first.labels).next().unwrap_or_default();
             let short = label.strip_prefix("RC_").unwrap_or(label);
             let slot = BED_LABELS.iter().position(|l| *l == short).ok_or_else(|| {
                 unsupported(format!("bed channel {label:?} is not part of a 7.1.2 bed"))
             })?;
-            let number = u32::try_from(track.channel)
+            let source_channel = u32::try_from(track.channel)
                 .ok()
                 .and_then(|n| n.checked_sub(1))
                 .ok_or_else(|| {
                     Error::invalid(format!("bed track {} is not in chna", s.text(track.uid)))
                 })?;
-            if self.channels[slot].replace(number).is_some() {
+            if self.channels[slot].replace(source_channel).is_some() {
                 return Err(Error::invalid(format!("bed channel {label} appears twice")));
+            }
+            let end = blocks.last().expect("bed has blocks").end.min(object.end);
+            self.bed_end = self.bed_end.map(|previous| previous.min(end));
+            if first.start != 0
+                || end < self.frames
+                || blocks.windows(2).any(|pair| pair[0].end != pair[1].start)
+            {
+                losses.report(
+                    None,
+                    Some(first.start),
+                    "bed_timing",
+                    format!("Bed channel {label} does not continuously span the programme"),
+                )?;
             }
             if first.pack_id != NONE
                 && let Some(pack) = s.doc.element_by_id(s.text(first.pack_id))
@@ -632,7 +680,9 @@ impl AdmReader {
                 pack_name.clone_into(&mut self.spec.bed_pack_name);
             }
             for block in blocks {
-                if (block.gain - 1.).abs() > f32::EPSILON {
+                let gain = block.source.gain;
+                let unity = if gain.decibels != 0 { 0. } else { 1. };
+                if gain.value != unity {
                     losses.report(
                         None,
                         Some(block.start),
@@ -647,6 +697,56 @@ impl AdmReader {
                         "bed_head_tracking",
                         format!("Bed channel {label} headLocked has no mapping"),
                     )?;
+                }
+                if !s
+                    .list(block.labels)
+                    .map(|l| l.strip_prefix("RC_").unwrap_or(l))
+                    .eq(std::iter::once(short))
+                {
+                    losses.report(
+                        None,
+                        Some(block.start),
+                        "bed_position",
+                        format!("Bed channel {label} changes its speaker labels"),
+                    )?;
+                }
+                for child in s.doc.element_children(block.node) {
+                    let field = s.doc.element_name(child).unwrap_or_default();
+                    match field {
+                        "speakerLabel" | "cartesian" | "gain" | "headLocked" => {}
+                        "position" => {
+                            if ["bound", "screenEdgeLock"]
+                                .iter()
+                                .any(|a| s.doc.element_attribute(child, a).is_some())
+                            {
+                                losses.report(
+                                    None,
+                                    Some(block.start),
+                                    "bed_position",
+                                    format!(
+                                        "Bed channel {label} position attributes have no mapping"
+                                    ),
+                                )?;
+                            }
+                        }
+                        "importance" => {
+                            let text = s.doc.element_text(child).unwrap_or_default();
+                            if number(text, "importance")? != 10. {
+                                losses.report(
+                                    None,
+                                    Some(block.start),
+                                    "bed_importance",
+                                    format!("Bed channel {label} importance has no mapping"),
+                                )?;
+                            }
+                        }
+                        _ => losses.report(
+                            None,
+                            Some(block.start),
+                            "unknown_field",
+                            format!("Bed channel {label} block element {field:?} has no mapping"),
+                        )?,
+                    }
                 }
             }
         }
@@ -675,6 +775,7 @@ impl AdmReader {
             losses,
         )?;
         let track = &scene.tracks[object.tracks.offset];
+        s.channel_losses(track.uid, Some(id), losses)?;
         let mut blocks: Vec<_> = scene.object_blocks
             [track.blocks.offset..track.blocks.offset + track.blocks.len]
             .iter()
@@ -688,11 +789,12 @@ impl AdmReader {
                 .context(id, pair[1].start, "block"));
             }
         }
-        let end = if object.duration_present != 0 {
-            object.end
-        } else {
-            u64::MAX
-        };
+        let end = object
+            .end
+            .min(blocks.last().expect("object has blocks").end);
+        if end != u64::MAX {
+            self.object_ends.push((id, end));
+        }
         let first = blocks[0];
         let mut state = block_state(
             s.doc,
@@ -786,6 +888,31 @@ impl AdmReader {
     pub fn updates(&self) -> &[ObjectUpdate] {
         &self.updates
     }
+    /// 返回指定音频长度下的更新，保留有限的对象结束边界。
+    /// 末尾及其后的停用事件不必写入，其他更新仍须由转换流程核对音频覆盖范围。
+    pub fn updates_for_frames(
+        &self,
+        frames: u64,
+    ) -> impl Iterator<Item = ObjectUpdate> + Clone + '_ {
+        self.updates
+            .iter()
+            .copied()
+            .filter(move |u| u.sample < frames || u.patch.active != Some(false))
+            .chain(
+                self.object_ends
+                    .iter()
+                    .filter(move |(_, end)| *end >= self.frames && *end < frames)
+                    .map(|&(track, sample)| ObjectUpdate {
+                        track,
+                        sample,
+                        ramp_samples: None,
+                        patch: ObjectPatch {
+                            active: Some(false),
+                            ..ObjectPatch::default()
+                        },
+                    }),
+            )
+    }
     pub fn last_event_sample(&self) -> Option<u64> {
         self.last_sample
     }
@@ -815,12 +942,31 @@ impl AdmReader {
             "ADM track index",
             audio.input,
         )?;
+        let frames = audio.frames();
+        let mut diagnostics = self.diagnostics.clone();
+        if self
+            .bed_end
+            .is_some_and(|end| end >= self.frames && end < frames)
+        {
+            Losses {
+                policy: self.spec.loss_policy,
+                diagnostics: &mut diagnostics,
+            }
+            .report(
+                None,
+                None,
+                "bed_timing",
+                "The bed ends before the replacement audio and cannot be extended exactly".into(),
+            )?;
+        }
+        let updates = self.updates_for_frames(frames);
+        let last_sample = updates.clone().map(|u| u.sample).max();
         write_conversion(
             &self.spec,
-            self.updates.iter().copied().map(Ok),
+            updates.map(Ok),
             audio,
-            self.last_sample,
-            &self.diagnostics,
+            last_sample,
+            &diagnostics,
             targets,
         )
     }

@@ -293,6 +293,23 @@ impl Document {
     pub fn element_by_id(&self, id: &str) -> Option<u32> {
         self.ids.get(&canonical_id(id)).copied()
     }
+    /// 返回轨道 UID 对应的声道元素，沿用 CHNA 合并与 TrackFormat / StreamFormat 引用解析。
+    /// 未指定独立声道时返回其 pack 的声道，未知 UID 返回空列表。
+    pub fn track_channels(&self, id: &str) -> Vec<u32> {
+        let Some(uid) = self.element_by_id(id) else {
+            return Vec::new();
+        };
+        if self.node(uid).local != "audioTrackUID" {
+            return Vec::new();
+        }
+        self.channel(uid).map_or_else(
+            || {
+                self.reference(uid, "audioPackFormatIDRef")
+                    .map_or_else(Vec::new, |pack| self.refs(pack, "audioChannelFormatIDRef"))
+            },
+            |channel| vec![channel],
+        )
+    }
     fn checked(&self, key: u32) -> Option<&Node> {
         self.tree(key).nodes.get((key & !COMMON) as usize)
     }
@@ -548,7 +565,8 @@ pub(crate) fn number(text: &str) -> Result<f64> {
     }
     Ok(value)
 }
-pub(crate) fn boolean(text: &str) -> Result<u32> {
+/// 解析 ADM 布尔文本，接受 `0` / `false` 与 `1` / `true`，返回记录使用的整数标志。
+pub fn boolean(text: &str) -> Result<u32> {
     match text.trim() {
         "0" | "false" => Ok(0),
         "1" | "true" => Ok(1),
