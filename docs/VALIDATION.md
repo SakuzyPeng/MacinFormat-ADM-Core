@@ -82,3 +82,42 @@ Standard 必须通过独立 EAR 验证，3DoF 必须通过 atmos_info，Logic/ho
 
 - DAMF 局部耳机事件：已有独立检查器以新库生成的 home 包为输入，home/3DoF 验证通过；官方工具原生 DAMF 往返保持连续字段命令与耳机事件时间线。ADM 转换不作为 ramp 保真判据。
 - GitHub Actions 的 macOS/Windows 矩阵在代码提交 2fceb9dd3fc2d163ab1290a07f5be58fae233382 上通过；run 43614066686。
+
+## ADM 流式读取内存对照
+
+日期：2026-11-15，macOS arm64 / Rust 1.98，release 构建。
+
+本次优化针对 `macin-atmos::adm::AdmReader` 与 `mfadm convert`。通用 `Document` / `Snapshot`、
+语义回写与 `mfadm adm` 检查命令保留原有整体解析方式。
+
+- 打开时先扫描 AXML，保留引用结构、每个声道的首个 block、文件范围与结束边界；随后逐块验证选中的时间线，
+  得到初始状态、更新计数和诊断。调用 `updates()` 时重新流式读取，未建立全部更新的列表。
+- 有序声道不建立逐 block 索引。乱序声道使用每个 block 的采样起点和文件范围构建稳定排序索引，
+  内存会随该声道的 block 数增长；索引通过共享引用复用。没有新增读取缓存或临时文件。
+- `updates()` / `updates_for_frames()` 改为可失败迭代器，`update_count()` / `update_count_for_frames()`
+  无需重新扫描。源文件必须保持可读且不变；提前 EOF 不会被拼接的 XML 结束标签掩盖。
+
+合成输入使用 118 个单轨 Objects、48 kHz、24-bit 静音 PCM，音频统一为 6,000 帧。
+每个对象有 100、1,000 或 6,000 个连续的单采样 block，X 坐标交替为 ±0.125，均匀尺寸为 0.25。
+输入没有 bed，转成 Standard ADM 时补静音 bed。以 `/usr/bin/time -l` 读取转换进程峰值 RSS；
+耗时为对照脚本的转换及输出 SHA-256 校验总时间，单次运行，不作为稳定的吞吐基准。
+AXML 的 MB 为十进制，RSS 的 MiB 为二进制。
+
+| block 总数 | AXML 大小 | 改进前峰值 | 改进后峰值 | 改进前耗时 | 改进后耗时 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 11,800 | 4.79 MB | 64.5 MiB | 18.2 MiB | 0.164 秒 | 0.337 秒 |
+| 118,000 | 47.43 MB | 557.7 MiB | 19.4 MiB | 1.266 秒 | 2.999 秒 |
+| 708,000 | 284.90 MB | 未运行 | 18.8 MiB | 未运行 | 18.210 秒 |
+
+前两组转换输出的更新计数分别为 11,800、118,000，改进前后整个输出文件逐字节相同。
+SHA-256 分别为 `16695cc0b97a3e9e5127bcb3a5a09f47f8acfe4ec09298c402252a84c2c08dee`、
+`80961d91820401956b4b2631d523146ea050355f170101fc717ec8324f9b54a5`。
+第三组输出 707,882 条更新；末块恰好到达音频末尾，不额外提交停用事件。
+
+回归覆盖原有 Standard/Logic 逐字节往返、ADM/DAMF 转换、替换音频结束边界，以及新增的乱序稳定排序、
+继承的默认命名空间与前缀、外部命名空间元素隔离、后续 block 校验、流读取被截断后返回结构化错误并终止。
+声道片段投影还与完整文档投影比较，并覆盖内置 common definitions。
+
+最终检查：`cargo fmt --all -- --check`、workspace 全 target Clippy（`-D warnings`）、
+`cargo test --locked --workspace` 全部通过，122 项测试通过，1 项历史真实 4 GiB 测试保持 ignored；
+不开 `read` feature 的检查与 release CLI 构建通过。基准生成的媒体文件已清理。

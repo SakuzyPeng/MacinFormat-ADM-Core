@@ -71,6 +71,11 @@ fn patch(track: u64, sample: u64, ramp: Option<u64>, patch: ObjectPatch) -> Obje
         patch,
     }
 }
+fn read_updates(reader: &AdmReader) -> Vec<ObjectUpdate> {
+    let updates: Vec<_> = reader.updates().unwrap().map(Result::unwrap).collect();
+    assert_eq!(updates.len() as u64, reader.update_count());
+    updates
+}
 fn updates() -> Vec<ObjectUpdate> {
     vec![
         patch(
@@ -207,7 +212,7 @@ fn adm_reads_back_into_the_model_it_was_written_from() {
     for (a, b) in read.objects.iter().zip(&expected.objects) {
         assert_eq!(a.initial, b.initial, "{}", a.name);
     }
-    let updates = reader.updates();
+    let updates = read_updates(&reader);
     let fly_by: Vec<_> = updates
         .iter()
         .filter(|u| u.track == TrackId(12))
@@ -304,8 +309,8 @@ fn gains_survive_the_trip_through_damf_within_its_precision() {
     .unwrap();
     let damf = DamfReader::open(dir.path("damf/master.atmos"), LossPolicy::Reject).unwrap();
     let from_damf: Vec<_> = damf.updates().unwrap().map(Result::unwrap).collect();
-    assert_eq!(from_damf.len(), adm.updates().len());
-    for (a, b) in adm.updates().iter().zip(&from_damf) {
+    assert_eq!(from_damf.len(), read_updates(&adm).len());
+    for (a, b) in read_updates(&adm).iter().zip(&from_damf) {
         assert_eq!(
             (a.track.0 - 1, a.sample, a.ramp_samples),
             (b.track.0, b.sample, b.ramp_samples)
@@ -513,8 +518,7 @@ fn third_party_adm_timing_gain_and_channel_order_are_read() {
     let late = &spec.objects[1].initial;
     assert!(!late.active, "inactive before its start");
     assert!((late.gain.linear() - 0.5 * libm::pow(10., -6. / 20.)).abs() < 1e-12);
-    let timeline: Vec<_> = reader
-        .updates()
+    let timeline: Vec<_> = read_updates(&reader)
         .iter()
         .map(|u| (u.track.0, u.sample, u.ramp_samples, u.patch.active))
         .collect();
@@ -527,10 +531,10 @@ fn third_party_adm_timing_gain_and_channel_order_are_read() {
             (12, 3600, None, Some(false)),
         ]
     );
-    let ramp = &reader.updates()[1].patch;
+    let ramp = &read_updates(&reader)[1].patch;
     assert_eq!(ramp.position, Some([1., 1., 0.]));
     assert_eq!(ramp.extent, Some(Some(Extent::Uniform(0.3))));
-    let jump = &reader.updates()[2].patch;
+    let jump = &read_updates(&reader)[2].patch;
     assert!((jump.gain.unwrap().linear() - libm::pow(10., -18. / 20.)).abs() < 1e-12);
     assert_eq!(jump.importance, Some(0.4));
 
@@ -861,14 +865,14 @@ fn omitted_cartesian_z_defaults_to_zero_in_each_block() {
     );
     let reader = AdmReader::open(&source, LossPolicy::Reject).unwrap();
     assert_eq!(reader.spec().objects[0].initial.position, [0., 1., 0.5]);
-    assert_eq!(reader.updates()[0].patch.position, Some([0., 1., 0.]));
+    assert_eq!(read_updates(&reader)[0].patch.position, Some([0., 1., 0.]));
     let no_z = dir.path("no-z.wav");
     rewrite_axml(&source, &no_z, |xml| {
         xml.replace("<position coordinate=\"Z\">0.5</position>", "")
     });
     let flat = AdmReader::open(&no_z, LossPolicy::Reject).unwrap();
     assert_eq!(flat.spec().objects[0].initial.position, [0., 1., 0.]);
-    assert!(flat.updates().is_empty());
+    assert!(read_updates(&flat).is_empty());
     for axis in ["X", "Y"] {
         let missing = dir.path(&format!("missing-{axis}.wav"));
         rewrite_axml(&no_z, &missing, |xml| {
@@ -1074,7 +1078,7 @@ fn finite_last_blocks_stop_objects_at_their_effective_end() {
             }],
         );
         let reader = AdmReader::open(&source, LossPolicy::Reject).unwrap();
-        let last = reader.updates().last().unwrap();
+        let last = reader.updates().unwrap().last().unwrap().unwrap();
         assert_eq!((last.sample, last.patch.active), (expected, Some(false)));
         assert_eq!(reader.last_event_sample(), Some(expected));
         let output = dir.path("damf");
@@ -1096,7 +1100,7 @@ fn finite_last_blocks_stop_objects_at_their_effective_end() {
             .unwrap();
         let adm = AdmReader::open(output, LossPolicy::Reject).unwrap();
         assert!(
-            adm.updates()
+            read_updates(&adm)
                 .iter()
                 .any(|u| u.sample == expected && u.patch.gain == Some(Gain::Linear(0.)))
         );
@@ -1120,7 +1124,7 @@ fn replacement_audio_preserves_object_end_boundaries() {
             }],
         );
         let reader = AdmReader::open(source, LossPolicy::Reject).unwrap();
-        assert!(reader.updates().is_empty());
+        assert!(read_updates(&reader).is_empty());
         for frames in [2400, 4800, 9600] {
             let audio = dir.path(&format!("audio-{frames}.wav"));
             let mut writer = Writer::new(
@@ -1156,4 +1160,196 @@ fn replacement_audio_preserves_object_end_boundaries() {
             }
         }
     }
+}
+
+fn streaming_blocks(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|sample| {
+            format!(
+                "rtime=\"00:00:00.{sample}S48000\" duration=\"00:00:00.1S48000\"><cartesian>true</cartesian>\
+                 <position coordinate=\"X\">{}</position><position coordinate=\"Y\">1</position>\
+                 <position coordinate=\"Z\">0</position>",
+                if sample.is_multiple_of(2) { "-0.125" } else { "0.125" },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn streaming_preserves_unsorted_blocks_and_inherited_namespaces() {
+    let dir = Temp::new();
+    let blocks = streaming_blocks(3);
+    let ordered = dir.path("ordered.wav");
+    let unordered = dir.path("unordered.wav");
+    for (path, indices) in [(&ordered, [0, 1, 2]), (&unordered, [2, 0, 1])] {
+        let blocks: Vec<_> = indices.iter().map(|&i| blocks[i].as_str()).collect();
+        third_party(
+            path,
+            "",
+            &[Object {
+                track: 11,
+                name: "Stream",
+                attributes: "",
+                elements: "",
+                blocks: &blocks,
+            }],
+        );
+    }
+    let namespaced = dir.path("namespaced.wav");
+    rewrite_axml(&unordered, &namespaced, |xml| {
+        let mut xml = xml.replace("<ebuCoreMain>",
+            "<ebuCoreMain xmlns=\"urn:test:adm\" xmlns:a=\"urn:test:adm\" xmlns:e=\"urn:test:extension\">");
+        for name in [
+            "audioChannelFormat",
+            "audioBlockFormat",
+            "position",
+            "cartesian",
+        ] {
+            xml = xml
+                .replace(&format!("<{name} "), &format!("<a:{name} "))
+                .replace(&format!("<{name}>"), &format!("<a:{name}>"))
+                .replace(&format!("</{name}>"), &format!("</a:{name}>"));
+        }
+        xml.replace("</a:audioBlockFormat>",
+            "<e:position coordinate=\"X\">999</e:position></a:audioBlockFormat>\n<!-- block separator -->\n")
+    });
+    let expected = AdmReader::open(&ordered, LossPolicy::Reject).unwrap();
+    let expected_updates = read_updates(&expected);
+    assert_eq!(expected_updates.len(), 3);
+    let expected_output = dir.path("expected.wav");
+    expected
+        .convert(
+            expected.audio().unwrap(),
+            &to(expected_output.clone(), Profile::Standard),
+        )
+        .unwrap();
+    for (i, input) in [unordered, namespaced].into_iter().enumerate() {
+        let reader = AdmReader::open(input, LossPolicy::Reject).unwrap();
+        assert_eq!(
+            reader.spec().objects[0].initial,
+            expected.spec().objects[0].initial
+        );
+        assert_eq!(read_updates(&reader), expected_updates);
+        for frames in [1, 3, 4800, 9600] {
+            let updates: Vec<_> = reader
+                .updates_for_frames(frames)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(updates.len() as u64, reader.update_count_for_frames(frames));
+        }
+        let output = dir.path(&format!("out-{i}.wav"));
+        reader
+            .convert(
+                reader.audio().unwrap(),
+                &to(output.clone(), Profile::Standard),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(output).unwrap(),
+            fs::read(&expected_output).unwrap()
+        );
+    }
+}
+
+#[test]
+fn streaming_reports_io_errors_and_stops_after_truncation() {
+    let dir = Temp::new();
+    let source = dir.path("source.wav");
+    let blocks = streaming_blocks(1000);
+    let blocks: Vec<_> = blocks.iter().map(String::as_str).collect();
+    third_party(
+        &source,
+        "",
+        &[Object {
+            track: 11,
+            name: "Stream",
+            attributes: "",
+            elements: "",
+            blocks: &blocks,
+        }],
+    );
+    let reader = AdmReader::open(&source, LossPolicy::Reject).unwrap();
+    assert_eq!(reader.update_count(), 1000);
+    let mut updates = reader.updates().unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    let error = updates.by_ref().collect::<Result<Vec<_>>>().unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Io, "{error}");
+    assert!(updates.next().is_none());
+    fs::remove_file(&source).unwrap();
+    assert_eq!(reader.updates().unwrap_err().kind, ErrorKind::Io);
+}
+
+#[test]
+fn streaming_checks_later_blocks_before_returning_a_reader() {
+    let dir = Temp::new();
+    let source = dir.path("source.wav");
+    let mut blocks = streaming_blocks(3);
+    blocks[2].push_str("<diffuse>2</diffuse>");
+    let blocks: Vec<_> = blocks.iter().map(String::as_str).collect();
+    third_party(
+        &source,
+        "",
+        &[Object {
+            track: 11,
+            name: "Stream",
+            attributes: "",
+            elements: "",
+            blocks: &blocks,
+        }],
+    );
+    let error = AdmReader::open(source, LossPolicy::Allow).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidInput);
+    assert!(error.message.contains("diffuse"), "{error}");
+}
+
+#[test]
+fn empty_channels_in_a_pack_do_not_extend_the_object_timeline() {
+    let dir = Temp::new();
+    let original = dir.path("original.wav");
+    let blocks = streaming_blocks(1);
+    third_party(
+        &original,
+        "",
+        &[Object {
+            track: 11,
+            name: "Stream",
+            attributes: "",
+            elements: "",
+            blocks: &[&blocks[0]],
+        }],
+    );
+    let xml_path = dir.path("xml.wav");
+    rewrite_axml(&original, &xml_path, |xml| {
+        xml.replace("<audioChannelFormatIDRef>AC_00031001</audioChannelFormatIDRef>",
+            "<audioChannelFormatIDRef>AC_00031001</audioChannelFormatIDRef><audioChannelFormatIDRef>AC_00031002</audioChannelFormatIDRef>")
+            .replace("</audioFormatExtended>",
+                "<audioChannelFormat audioChannelFormatID=\"AC_00031002\" audioChannelFormatName=\"Empty\" typeDefinition=\"Objects\"/>\
+                 <audioStreamFormat audioStreamFormatID=\"AS_00031001\" audioStreamFormatName=\"S\" formatDefinition=\"PCM\"><audioTrackFormatIDRef>AT_00031001_01</audioTrackFormatIDRef></audioStreamFormat>\
+                 <audioTrackFormat audioTrackFormatID=\"AT_00031001_01\" audioTrackFormatName=\"T\" formatDefinition=\"PCM\"><audioStreamFormatIDRef>AS_00031001</audioStreamFormatIDRef></audioTrackFormat>\
+                 </audioFormatExtended>")
+    });
+    let mut chunks = macin_bwf::ChunkReader::new(fs::File::open(&xml_path).unwrap()).unwrap();
+    let mut chna = Chna::decode(&chunks.metadata(*b"chna", 1 << 20).unwrap().unwrap()).unwrap();
+    chna.entries.last_mut().unwrap().track_format = *b"AT_00031001_01";
+    let source = dir.path("source.wav");
+    macin_bwf::replace_chunk(
+        chunks.into_inner(),
+        fs::File::create(&source).unwrap(),
+        *b"chna",
+        &chna.encode().unwrap(),
+    )
+    .unwrap();
+    let reader = AdmReader::open(source, LossPolicy::Reject).unwrap();
+    let updates = read_updates(&reader);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        (updates[0].sample, updates[0].patch.active),
+        (1, Some(false))
+    );
 }

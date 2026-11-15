@@ -164,7 +164,7 @@ pub fn convert_with_dbmd_identity(
             Some(path) => reader.wave_audio(path)?,
             None => reader.audio()?,
         };
-        let updates = reader.updates_for_frames(input.frames()).count() as u64;
+        let updates = reader.update_count_for_frames(input.frames());
         let conversion = reader.convert(input, targets)?;
         (reader.spec().clone(), updates, conversion)
     } else {

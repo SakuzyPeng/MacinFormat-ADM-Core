@@ -539,7 +539,8 @@ fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
     let adm = macin_atmos::adm::AdmReader::open(adm_path, macin_atmos::LossPolicy::Reject).unwrap();
     assert!(
         adm.updates()
-            .iter()
+            .unwrap()
+            .map(Result::unwrap)
             .any(|u| u.sample == 4800 && u.patch.gain == Some(macin_atmos::Gain::Linear(0.)))
     );
 }

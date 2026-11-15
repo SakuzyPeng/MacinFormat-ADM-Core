@@ -9,6 +9,9 @@
 //!
 //! Numbers are parsed from the document text as `f64`, not taken from the `f32` projection, so a
 //! master written by this crate reads back to the values it was written from.
+//!
+//! 母版读取逐块扫描 AXML，只保留引用结构和声道范围；有序时间线不累计全部 block 或更新。
+//! 乱序声道保留紧凑偏移索引，以维持稳定的时间排序。更新迭代期间源文件须保持可读且不变。
 use crate::damf::{AudioSource, Conversion, Input, write_conversion};
 use crate::*;
 use macin_adm::records::{NONE, Span};
@@ -19,7 +22,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-/// Largest `axml` chunk read into memory.
+mod stream;
+use stream::{Channel, Index, ProjectedBlocks};
+
+/// 接受的最大 `axml` chunk；按流扫描，不整体载入内存。
 pub const AXML_LIMIT: u64 = 1 << 30;
 const CHNA_LIMIT: u64 = 4 + 40 * u16::MAX as u64;
 
@@ -30,7 +36,9 @@ pub struct AdmReader {
     path: PathBuf,
     /// The source channel (0-based) feeding each output channel: ten bed slots, then objects.
     channels: Vec<Option<u32>>,
-    updates: Vec<ObjectUpdate>,
+    updates: u64,
+    timelines: Vec<ObjectTimeline>,
+    last_change: Option<u64>,
     /// 有限结束边界独立于原音频长度保存，用于转换时提交停用事件。
     object_ends: Vec<(TrackId, u64)>,
     bed_end: Option<u64>,
@@ -276,11 +284,276 @@ fn difference(current: &ObjectState, next: &ObjectState) -> ObjectPatch {
     }
 }
 
+fn channel_end(channels: &[Channel], start: u64) -> u64 {
+    channels
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, c)| (c.last.0, *i))
+        .map_or(u64::MAX, |(_, c)| start.saturating_add(c.last.1))
+}
+
+#[derive(Debug, Clone)]
+struct ObjectTimeline {
+    id: TrackId,
+    channels: Vec<Channel>,
+    start: u64,
+    locked: u32,
+    factor: Option<f64>,
+    end: u64,
+}
+
+struct ObjectEvents {
+    blocks: ProjectedBlocks,
+    timeline: ObjectTimeline,
+    state: ObjectState,
+    initial: ObjectState,
+    previous_end: u64,
+    activation: Option<ObjectUpdate>,
+    source_frames: u64,
+    frames: u64,
+    done: bool,
+}
+
+impl ObjectEvents {
+    fn new(
+        path: &Path,
+        timeline: ObjectTimeline,
+        rate: u32,
+        source_frames: u64,
+        frames: u64,
+        losses: &mut Losses<'_>,
+    ) -> Result<Self> {
+        let mut blocks = ProjectedBlocks::new(
+            &timeline.channels,
+            path,
+            rate,
+            timeline.start,
+            timeline.locked,
+        )?;
+        let first = blocks
+            .next()?
+            .ok_or_else(|| Error::invalid("对象声道没有 block"))?;
+        let block = first
+            .scene
+            .object_blocks
+            .first()
+            .ok_or_else(|| unsupported("对象需要 Objects block"))?;
+        let state = block_state(
+            &first.doc,
+            block.node,
+            ObjectState::default(),
+            timeline.factor,
+            losses,
+            timeline.id,
+            block.start,
+        )?;
+        let begin = block.start.max(timeline.start);
+        let mut initial = state;
+        initial.active = begin == 0;
+        let activation =
+            (begin > 0 && begin < source_frames.min(timeline.end)).then_some(ObjectUpdate {
+                track: timeline.id,
+                sample: begin,
+                ramp_samples: None,
+                patch: ObjectPatch {
+                    active: Some(true),
+                    ..ObjectPatch::default()
+                },
+            });
+        Ok(Self {
+            blocks,
+            timeline,
+            state,
+            initial,
+            previous_end: block.end,
+            activation,
+            source_frames,
+            frames,
+            done: false,
+        })
+    }
+
+    fn next_event(&mut self, losses: &mut Losses<'_>) -> Result<Option<ObjectUpdate>> {
+        if let Some(update) = self.activation.take() {
+            return Ok(Some(update));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        while let Some(item) = self.blocks.next()? {
+            let block = &item.scene.object_blocks[0];
+            if self.previous_end != block.start {
+                return Err(
+                    unsupported("the blocks do not form a contiguous timeline").context(
+                        self.timeline.id,
+                        block.start,
+                        "block",
+                    ),
+                );
+            }
+            self.previous_end = block.end;
+            if block.start >= self.source_frames.min(self.timeline.end) {
+                continue;
+            }
+            let next = block_state(
+                &item.doc,
+                block.node,
+                self.state,
+                self.timeline.factor,
+                losses,
+                self.timeline.id,
+                block.start,
+            )?;
+            let patch = difference(&self.state, &next);
+            self.state = next;
+            if patch == ObjectPatch::default() {
+                continue;
+            }
+            let duration = block.end.saturating_sub(block.start);
+            let ramp = if block.jump == 0 {
+                if block.end == u64::MAX { 0 } else { duration }
+            } else {
+                block.interpolation.min(duration)
+            };
+            return Ok(Some(ObjectUpdate {
+                track: self.timeline.id,
+                sample: block.start,
+                ramp_samples: patch.has_continuous().then_some(ramp),
+                patch,
+            }));
+        }
+        self.done = true;
+        Ok((self.timeline.end < self.frames).then_some(ObjectUpdate {
+            track: self.timeline.id,
+            sample: self.timeline.end,
+            ramp_samples: None,
+            patch: ObjectPatch {
+                active: Some(false),
+                ..ObjectPatch::default()
+            },
+        }))
+    }
+}
+
+/// 逐对象、逐 block 读取的 ADM 更新流；遇到错误后终止。
+pub struct Updates {
+    path: PathBuf,
+    timelines: std::vec::IntoIter<ObjectTimeline>,
+    current: Option<ObjectEvents>,
+    rate: u32,
+    source_frames: u64,
+    frames: u64,
+    policy: LossPolicy,
+    failed: bool,
+}
+
+impl std::fmt::Debug for Updates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Updates")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Updates {
+    fn advance(&mut self) -> Result<()> {
+        let mut diagnostics = Vec::new();
+        let mut losses = Losses {
+            policy: self.policy,
+            diagnostics: &mut diagnostics,
+        };
+        self.current = self
+            .timelines
+            .next()
+            .map(|timeline| {
+                ObjectEvents::new(
+                    &self.path,
+                    timeline,
+                    self.rate,
+                    self.source_frames,
+                    self.frames,
+                    &mut losses,
+                )
+            })
+            .transpose()
+            .map_err(|e| located(&self.path, e))?;
+        Ok(())
+    }
+    fn next_update(&mut self) -> Result<Option<ObjectUpdate>> {
+        let mut diagnostics = Vec::new();
+        let mut losses = Losses {
+            policy: self.policy,
+            diagnostics: &mut diagnostics,
+        };
+        while let Some(events) = &mut self.current {
+            if let Some(update) = events.next_event(&mut losses)? {
+                return Ok(Some(update));
+            }
+            self.advance()?;
+        }
+        Ok(None)
+    }
+}
+
+impl Iterator for Updates {
+    type Item = Result<ObjectUpdate>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        match self.next_update() {
+            Ok(Some(update)) => Some(Ok(update)),
+            Ok(None) => None,
+            Err(error) => {
+                self.failed = true;
+                self.current = None;
+                Some(Err(located(&self.path, error)))
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for Updates {}
+
 struct Scene<'a> {
     doc: &'a Document,
     scene: &'a Snapshot,
+    index: &'a Index,
 }
 impl Scene<'_> {
+    fn channels(&self, uid: u32, rate: u32) -> Result<Vec<Channel>> {
+        self.doc
+            .track_channels(self.text(uid))
+            .into_iter()
+            .filter(|&node| {
+                self.doc
+                    .element_children(node)
+                    .into_iter()
+                    .any(|child| self.doc.element_name(child) == Some("audioBlockFormat"))
+            })
+            .map(|node| {
+                let id = self
+                    .doc
+                    .element_attribute(node, "audioChannelFormatID")
+                    .ok_or_else(|| Error::invalid("声道缺少 ID"))?;
+                self.index
+                    .channels
+                    .get(&id.to_ascii_uppercase())
+                    .cloned()
+                    .map_or_else(
+                        || {
+                            Channel::inline(
+                                self.doc
+                                    .element_xml(node)
+                                    .ok_or_else(|| Error::invalid("声道缺少原文"))?,
+                                rate,
+                            )
+                        },
+                        Ok,
+                    )
+            })
+            .collect()
+    }
     fn text(&self, index: u32) -> &str {
         if index == NONE {
             ""
@@ -333,8 +606,14 @@ impl AdmReader {
         let info = wave.info();
         let rate = info.format.sample_rate;
         let axml = wave
-            .metadata(*b"axml", AXML_LIMIT)?
+            .chunks()
+            .iter()
+            .find(|chunk| chunk.id == *b"axml")
+            .copied()
             .ok_or_else(|| unsupported("not an ADM BWF: there is no axml chunk"))?;
+        if axml.size > AXML_LIMIT {
+            return Err(unsupported("WAVE 元数据超过调用方预算"));
+        }
         let chna_bytes = wave
             .metadata(*b"chna", CHNA_LIMIT)?
             .ok_or_else(|| unsupported("not an ADM BWF: there is no chna chunk"))?;
@@ -366,8 +645,8 @@ impl AdmReader {
                 pack_id: (!pack.is_empty()).then_some(pack),
             });
         }
-        let xml = std::str::from_utf8(&axml).map_err(|_| Error::invalid("axml is not UTF-8"))?;
-        let doc = Document::parse_with_track_uids(xml, &definitions).map_err(adm_error)?;
+        let index = Index::read(path, axml, rate)?;
+        let doc = Document::parse_with_track_uids(&index.xml, &definitions).map_err(adm_error)?;
         let scene = Snapshot::extract(&doc, rate, &tracks).map_err(adm_error)?;
         let profile = if info.container == Container::Rf64
             && wave.chunks().iter().any(|c| &c.id == b"dbmd")
@@ -386,7 +665,9 @@ impl AdmReader {
             },
             path: path.to_owned(),
             channels: vec![None; BED_CHANNELS],
-            updates: Vec::new(),
+            updates: 0,
+            timelines: Vec::new(),
+            last_change: None,
             object_ends: Vec::new(),
             bed_end: None,
             last_sample: None,
@@ -397,6 +678,7 @@ impl AdmReader {
             &Scene {
                 doc: &doc,
                 scene: &scene,
+                index: &index,
             },
             &mut Losses {
                 policy,
@@ -640,14 +922,26 @@ impl AdmReader {
         self.bed_end = Some(object.end);
         for track in tracks {
             s.channel_losses(track.uid, None, losses)?;
-            let mut blocks: Vec<_> = scene.direct_blocks
-                [track.ds_blocks.offset..track.ds_blocks.offset + track.ds_blocks.len]
-                .iter()
-                .collect();
-            blocks.sort_by_key(|b| b.start);
-            let first = blocks[0];
-            let label = s.list(first.labels).next().unwrap_or_default();
-            let short = label.strip_prefix("RC_").unwrap_or(label);
+            let channels = s.channels(track.uid, self.spec.sample_rate)?;
+            let mut blocks = ProjectedBlocks::new(
+                &channels,
+                &self.path,
+                self.spec.sample_rate,
+                object.absolute_start,
+                object.head_locked,
+            )?;
+            let first = blocks
+                .next()?
+                .ok_or_else(|| Error::invalid("bed 声道没有 block"))?;
+            let first_block = &first.scene.direct_blocks[0];
+            let first_start = first_block.start;
+            let label = first.scene.indices
+                [first_block.labels.offset..first_block.labels.offset + first_block.labels.len]
+                .first()
+                .map(|&i| first.scene.strings[i as usize].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let short = label.strip_prefix("RC_").unwrap_or(&label).to_owned();
             let slot = BED_LABELS.iter().position(|l| *l == short).ok_or_else(|| {
                 unsupported(format!("bed channel {label:?} is not part of a 7.1.2 bed"))
             })?;
@@ -660,26 +954,42 @@ impl AdmReader {
             if self.channels[slot].replace(source_channel).is_some() {
                 return Err(Error::invalid(format!("bed channel {label} appears twice")));
             }
-            let end = blocks.last().expect("bed has blocks").end.min(object.end);
+            let end = channel_end(&channels, object.absolute_start).min(object.end);
             self.bed_end = self.bed_end.map(|previous| previous.min(end));
-            if first.start != 0
-                || end < self.frames
-                || blocks.windows(2).any(|pair| pair[0].end != pair[1].start)
-            {
+            if first_start != 0 || end < self.frames {
                 losses.report(
                     None,
-                    Some(first.start),
+                    Some(first_start),
                     "bed_timing",
                     format!("Bed channel {label} does not continuously span the programme"),
                 )?;
             }
-            if first.pack_id != NONE
-                && let Some(pack) = s.doc.element_by_id(s.text(first.pack_id))
+            let pack_id = scene.direct_blocks[track.ds_blocks.offset].pack_id;
+            if pack_id != NONE
+                && let Some(pack) = s.doc.element_by_id(s.text(pack_id))
                 && let Some(pack_name) = s.doc.element_attribute(pack, "audioPackFormatName")
             {
                 pack_name.clone_into(&mut self.spec.bed_pack_name);
             }
-            for block in blocks {
+            let mut current = Some(first);
+            let mut previous_end = None;
+            while let Some(item) = current.take() {
+                current = blocks.next()?;
+                let block = &item.scene.direct_blocks[0];
+                if previous_end.is_some_and(|end| end != block.start) {
+                    losses.report(
+                        None,
+                        Some(first_start),
+                        "bed_timing",
+                        format!("Bed channel {label} does not continuously span the programme"),
+                    )?;
+                }
+                previous_end = Some(block.end);
+                let s = Scene {
+                    doc: &item.doc,
+                    scene: &item.scene,
+                    index: s.index,
+                };
                 let gain = block.source.gain;
                 let unity = if gain.decibels != 0 { 0. } else { 1. };
                 if gain.value != unity {
@@ -701,7 +1011,7 @@ impl AdmReader {
                 if !s
                     .list(block.labels)
                     .map(|l| l.strip_prefix("RC_").unwrap_or(l))
-                    .eq(std::iter::once(short))
+                    .eq(std::iter::once(short.as_str()))
                 {
                     losses.report(
                         None,
@@ -776,90 +1086,36 @@ impl AdmReader {
         )?;
         let track = &scene.tracks[object.tracks.offset];
         s.channel_losses(track.uid, Some(id), losses)?;
-        let mut blocks: Vec<_> = scene.object_blocks
-            [track.blocks.offset..track.blocks.offset + track.blocks.len]
-            .iter()
-            .collect();
-        blocks.sort_by_key(|b| b.start);
-        for pair in blocks.windows(2) {
-            if pair[0].end != pair[1].start {
-                return Err(unsupported(format!(
-                    "the blocks of {name} do not form a contiguous timeline"
-                ))
-                .context(id, pair[1].start, "block"));
-            }
-        }
-        let end = object
-            .end
-            .min(blocks.last().expect("object has blocks").end);
+        let channels = s.channels(track.uid, self.spec.sample_rate)?;
+        let end = channel_end(&channels, object.absolute_start).min(object.end);
         if end != u64::MAX {
             self.object_ends.push((id, end));
         }
-        let first = blocks[0];
-        let mut state = block_state(
-            s.doc,
-            first.node,
-            ObjectState::default(),
-            factor,
-            losses,
+        let timeline = ObjectTimeline {
             id,
-            first.start,
+            channels,
+            start: object.absolute_start,
+            locked: object.head_locked,
+            factor,
+            end,
+        };
+        let mut events = ObjectEvents::new(
+            &self.path,
+            timeline.clone(),
+            self.spec.sample_rate,
+            self.frames,
+            self.frames,
+            losses,
         )?;
-        let begin = first.start.max(object.absolute_start);
-        let mut updates = Vec::new();
-        let mut initial = state;
-        if begin > 0 {
-            initial.active = false;
-            if begin < self.frames.min(end) {
-                updates.push(ObjectUpdate {
-                    track: id,
-                    sample: begin,
-                    ramp_samples: None,
-                    patch: ObjectPatch {
-                        active: Some(true),
-                        ..ObjectPatch::default()
-                    },
-                });
+        let initial = events.initial;
+        while let Some(update) = events.next_event(losses)? {
+            self.updates += 1;
+            self.last_sample = self.last_sample.max(Some(update.sample));
+            if update.patch.active != Some(false) {
+                self.last_change = self.last_change.max(Some(update.sample));
             }
         }
-        for block in &blocks[1..] {
-            if block.start >= self.frames.min(end) {
-                break;
-            }
-            let next = block_state(s.doc, block.node, state, factor, losses, id, block.start)?;
-            let patch = difference(&state, &next);
-            state = next;
-            if patch == ObjectPatch::default() {
-                continue;
-            }
-            let duration = block.end.saturating_sub(block.start);
-            let ramp = if block.jump == 0 {
-                if block.end == u64::MAX { 0 } else { duration }
-            } else {
-                block.interpolation.min(duration)
-            };
-            updates.push(ObjectUpdate {
-                track: id,
-                sample: block.start,
-                ramp_samples: patch.has_continuous().then_some(ramp),
-                patch,
-            });
-        }
-        if end < self.frames {
-            updates.push(ObjectUpdate {
-                track: id,
-                sample: end,
-                ramp_samples: None,
-                patch: ObjectPatch {
-                    active: Some(false),
-                    ..ObjectPatch::default()
-                },
-            });
-        }
-        if let Some(last) = updates.last() {
-            self.last_sample = self.last_sample.max(Some(last.sample));
-        }
-        self.updates.extend(updates);
+        self.timelines.push(timeline);
         let mut spec = ObjectSpec::new(id, name);
         spec.initial = initial;
         self.spec.objects.push(spec);
@@ -895,35 +1151,44 @@ impl AdmReader {
     pub fn diagnostics(&self) -> &[MappingDiagnostic] {
         &self.diagnostics
     }
-    /// The updates after the initial states, per object in time order. An object's `TrackId` is
-    /// its 1-based track in the file.
-    pub fn updates(&self) -> &[ObjectUpdate] {
-        &self.updates
+    /// 原音频长度下的更新，按对象、时间顺序流式读取；I/O 和解析错误通过迭代项返回。
+    /// 源文件在迭代完成前必须保持可读且内容不变。
+    pub fn updates(&self) -> Result<Updates> {
+        self.updates_for_frames(self.frames)
     }
     /// 返回指定音频长度下的更新，保留有限的对象结束边界。
-    /// 末尾及其后的停用事件不必写入，其他更新仍须由转换流程核对音频覆盖范围。
-    pub fn updates_for_frames(
-        &self,
-        frames: u64,
-    ) -> impl Iterator<Item = ObjectUpdate> + Clone + '_ {
+    /// 非停用事件仍按原音频范围读取，由转换流程核对替换音频是否覆盖它们。
+    pub fn updates_for_frames(&self, frames: u64) -> Result<Updates> {
+        let mut updates = Updates {
+            path: self.path.clone(),
+            timelines: self.timelines.clone().into_iter(),
+            current: None,
+            rate: self.spec.sample_rate,
+            source_frames: self.frames,
+            frames,
+            policy: self.spec.loss_policy,
+            failed: false,
+        };
+        updates.advance()?;
+        Ok(updates)
+    }
+    /// 原文件长度下的更新数；已在打开时统计，无需再扫描元数据。
+    pub fn update_count(&self) -> u64 {
         self.updates
-            .iter()
-            .copied()
-            .filter(move |u| u.sample < frames || u.patch.active != Some(false))
-            .chain(
-                self.object_ends
-                    .iter()
-                    .filter(move |(_, end)| *end >= self.frames && *end < frames)
-                    .map(|&(track, sample)| ObjectUpdate {
-                        track,
-                        sample,
-                        ramp_samples: None,
-                        patch: ObjectPatch {
-                            active: Some(false),
-                            ..ObjectPatch::default()
-                        },
-                    }),
-            )
+    }
+    /// 指定音频长度下的更新数，包括相应的有限停用边界。
+    pub fn update_count_for_frames(&self, frames: u64) -> u64 {
+        self.updates
+            - self
+                .object_ends
+                .iter()
+                .filter(|(_, end)| *end < self.frames && *end >= frames)
+                .count() as u64
+            + self
+                .object_ends
+                .iter()
+                .filter(|(_, end)| *end >= self.frames && *end < frames)
+                .count() as u64
     }
     pub fn last_event_sample(&self) -> Option<u64> {
         self.last_sample
@@ -971,11 +1236,17 @@ impl AdmReader {
                 "The bed ends before the replacement audio and cannot be extended exactly".into(),
             )?;
         }
-        let updates = self.updates_for_frames(frames);
-        let last_sample = updates.clone().map(|u| u.sample).max();
+        let updates = self.updates_for_frames(frames)?;
+        let last_sample = self.last_change.max(
+            self.object_ends
+                .iter()
+                .filter(|(_, end)| *end < frames)
+                .map(|(_, end)| *end)
+                .max(),
+        );
         write_conversion(
             &self.spec,
-            updates.map(Ok),
+            updates,
             audio,
             last_sample,
             &diagnostics,

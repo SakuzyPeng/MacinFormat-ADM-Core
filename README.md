@@ -335,7 +335,7 @@ film/master.atmos (home): 2 objects, 3 updates
 
 ## ADM 读取与转换
 
-需要 `read` feature。`AdmReader::open` 把 ADM BWF 读成与写入时相同的 `MasterSpec` 和一组 `ObjectUpdate`，
+需要 `read` feature。`AdmReader::open` 流式校验 ADM BWF，得到与写入时相同的 `MasterSpec`，由 `updates()` 按需读取 `ObjectUpdate`，
 `convert` 同样经 `MultiWriter` 写出，所以 ADM 转 DAMF 就是普通的写入，DAMF 一侧的损失检查照常生效。
 支持的是 Atmos 子集：本库写出的结构，以及其他工具写出的同类结构。
 
@@ -366,8 +366,17 @@ film/master.atmos (home): 2 objects, 3 updates
 - **DAMF 装不下的**：DAMF 没有节目名字段。节目名只是描述信息，写 DAMF 时直接省略、不按损失处理，
   所以 ADM 转 DAMF 再转回时节目名回到默认值。`screenRef` 写 DAMF 时则按损失处理。
   反过来，DAMF 里延伸到音频结尾之后的 ramp 在 ADM 中被截在结尾，读回是截短的 ramp 与当时的插值位置。
-- **内存**：AXML 由 `macin-adm` 整体解析，内存随元数据规模增长。实测 57.8 MB 的 AXML（118 个对象、11.8 万个事件）
-  峰值约 640 MiB；DAMF 读取则是流式的。
+- **内存**：母版读取保留引用结构、每个声道的首个 block 和文件范围，逐块校验与投影；不会整体载入 AXML，
+  也不缓存全部更新或创建临时文件。固定对象数和单条 block 大小时，有序时间线的内存基本不随事件总数增长。
+  乱序声道仍支持稳定排序，但会额外保留该声道每个 block 的文件偏移索引；结构性元数据、超大单条 block 和不同诊断也会增加内存。
+  macOS arm64 release 对照：118 个对象、11.8 万个 block，转换峰值从约 558 MiB 降到 19 MiB；
+  70.8 万个 block 仍约 19 MiB。代价是增加扫描与解析，前一用例耗时约从 1.27 秒变为 3.00 秒。
+  详见 [流式读取验证](docs/VALIDATION.md#adm-流式读取内存对照)。通用 `Document` / `Snapshot` 与 `mfadm adm` 检查命令仍整体解析。
+- **更新接口**：`updates()` 和 `updates_for_frames(frames)` 现在返回 `Result<Updates>`，迭代项为
+  `Result<ObjectUpdate>`，与 DAMF 一致；调用方需同时处理创建和迭代错误。`update_count()` 与
+  `update_count_for_frames(frames)` 使用打开时的统计，不额外扫描。需要完整列表时可显式
+  `reader.updates()?.collect::<macin_atmos::Result<Vec<_>>>()`，此时内存由调用方收集的事件数决定。
+  迭代期间源文件须保持可读且内容不变；读取或解析失败后迭代器返回错误并终止。
 
 ## 语义损失与诊断
 
@@ -405,7 +414,7 @@ cargo test --locked -p macin-atmos
 虚拟 4 GiB 边界检查。DAMF 读取的测试要求 DAMF 转 DAMF 三个成员逐字节复原、DAMF 转 ADM 与直接写 ADM 逐字节一致，
 并覆盖手写的第三方 YAML 写法、声道重排、WAV 代替音频、各类损失与拒绝。ADM 读取的测试要求 ADM 转同一配置逐字节复原、
 ADM 经 DAMF 再转回 ADM 逐字节一致，并覆盖只靠 CHNA 定义轨道的第三方写法、对象起止时间、整块插值、dB 与对象级增益、
-声道重排、各类损失与拒绝，以及预读过或来自其他读取器的音频。原生验证平台为 macOS arm64 与 Windows x64，CI 在这两个平台上跑同一套检查。
+声道重排、各类损失与拒绝，以及预读过或来自其他读取器的音频；另覆盖乱序 block、继承的命名空间、后续 block 校验和源文件被截断时的错误。原生验证平台为 macOS arm64 与 Windows x64，CI 在这两个平台上跑同一套检查。
 
 ## 外部工具互操作
 

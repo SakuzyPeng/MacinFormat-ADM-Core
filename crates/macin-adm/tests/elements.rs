@@ -62,3 +62,31 @@ fn unknown_node_numbers_are_none_not_panics() {
     }
     assert_eq!(doc.element_by_id("AO_9999"), None);
 }
+
+#[test]
+fn channel_fragments_match_full_projection_and_common_definitions() {
+    let doc = Document::parse(XML).unwrap();
+    let full = Snapshot::extract(&doc, 48000, &[("ATU_00000001".into(), 1)]).unwrap();
+    let channel = doc.element_by_id("AC_00031001").unwrap();
+    let fragment = Document::parse_channel(doc.element_xml(channel).unwrap()).unwrap();
+    let projected = Snapshot::extract_channel(&fragment, 1200, 0, 48000).unwrap();
+    let block = projected.object_blocks[0];
+    assert_eq!(block.position, full.object_blocks[0].position);
+    assert_eq!(block.source, full.object_blocks[0].source);
+    assert_eq!((block.start, block.end), (1200, 49200));
+    assert_eq!(fragment.element_name(block.node), Some("audioBlockFormat"));
+
+    let common = doc.element_by_id("AC_00010001").unwrap();
+    let fragment = Document::parse_channel(doc.element_xml(common).unwrap()).unwrap();
+    let projected = Snapshot::extract_channel(&fragment, 0, 0, 48000).unwrap();
+    assert_eq!(projected.direct_blocks.len(), 1);
+    let block = projected.direct_blocks[0];
+    assert_eq!(
+        projected.strings[projected.indices[block.labels.offset] as usize],
+        "urn:itu:bs:2051:0:speaker:M+030"
+    );
+    assert_eq!(block.pack_id, macin_adm::records::NONE);
+    assert_eq!(block.end, u64::MAX);
+    assert!(Document::parse_channel(XML).is_err());
+    assert!(Snapshot::extract_channel(&doc, 0, 0, 48000).is_err());
+}

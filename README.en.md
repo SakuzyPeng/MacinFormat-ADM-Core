@@ -403,8 +403,19 @@ library writes, and the same shape from other tools.
   out without reporting a loss, and ADM through DAMF and back returns the default name. `screenRef`, by
   contrast, is a loss when writing DAMF. The other way, a DAMF ramp that runs past the end of the audio
   is cut at the end in ADM and reads back as the shortened ramp to the value reached there.
-- **Memory**: `macin-adm` parses the AXML whole, so memory grows with the metadata. A 57.8 MB AXML (118
-  objects, 118,000 events) peaked at about 640 MiB; DAMF reading streams.
+- **Memory**: master reading streams the AXML and retains the reference structure, one initial block and a
+  file range per channel. Ordered timelines do not accumulate all blocks or updates in memory and need no
+  temporary files. Unordered channels retain a compact offset index for stable sorting; structural metadata,
+  individual block sizes and distinct diagnostics also affect memory. A macOS arm64 release comparison with
+  118 objects and 118,000 blocks reduced conversion peak memory from about 558 MiB to 19 MiB; 708,000 blocks
+  also used about 19 MiB. Additional scanning increased the smaller conversion from about 1.27 s to 3.00 s.
+  See the [validation record](docs/VALIDATION.md#adm-流式读取内存对照). General-purpose `Document` / `Snapshot`
+  and the `mfadm adm` inspection command still parse the full document.
+- **Update API**: `updates()` and `updates_for_frames(frames)` now return `Result<Updates>`, whose items are
+  `Result<ObjectUpdate>`, matching DAMF. Handle errors both when opening and while iterating.
+  `update_count()` and `update_count_for_frames(frames)` use counts gathered on open without another scan.
+  Explicitly collecting the iterator into a `Vec` makes its memory proportional to the number of updates.
+  Keep the input readable and unchanged while iterating; an I/O or parsing error terminates the iterator.
 
 ## Semantic loss and diagnostics
 

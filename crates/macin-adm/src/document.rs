@@ -91,6 +91,33 @@ fn afe(tree: &Tree, common: bool) -> Result<usize> {
 }
 
 impl Document {
+    /// 解析独立声道片段，供流式调用方逐块校验；命名空间声明须包含在片段中。
+    /// 不解析跨元素引用，根元素必须是带有效 ID 和类型的 audioChannelFormat。
+    pub fn parse_channel(source: &str) -> Result<Self> {
+        let common = COMMON_DEFINITIONS
+            .get_or_init(|| Tree::parse(include_str!("../assets/common_definitions.xml")))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let xml = Tree::parse(source)?;
+        let root = xml.root as u32;
+        let mut doc = Self {
+            xml,
+            common,
+            ids: HashMap::new(),
+            elements: vec![root],
+            track_streams: HashMap::new(),
+            track_uids: HashMap::new(),
+        };
+        if doc.node(root).local != "audioChannelFormat" {
+            return Err(Error::xml("声道片段需要 audioChannelFormat 根元素"));
+        }
+        let id = doc.id(root);
+        validate_id(&id, "AC")?;
+        doc.ids.insert(id, root);
+        doc.validate_ranges(root)?;
+        Ok(doc)
+    }
+
     pub fn parse(source: &str) -> Result<Self> {
         Self::parse_with_track_uids(source, &[])
     }
@@ -280,6 +307,11 @@ impl Document {
     /// The text content of element `node`, as written in the document.
     pub fn element_text(&self, node: u32) -> Option<&str> {
         self.checked(node).map(|n| n.text.as_str())
+    }
+    /// 原文中的完整元素片段；不补充祖先元素的命名空间声明。
+    pub fn element_xml(&self, node: u32) -> Option<&str> {
+        let element = self.checked(node)?;
+        self.tree(node).source.get(element.start..element.end)
     }
     /// The child elements of `node` in its own namespace, in document order.
     pub fn element_children(&self, node: u32) -> Vec<u32> {
@@ -573,7 +605,8 @@ pub fn boolean(text: &str) -> Result<u32> {
         _ => Err(Error::xml(format!("无效布尔值: {text}"))),
     }
 }
-pub(crate) fn samples(time: &str, rate: u32) -> Result<u64> {
+/// 将 ADM 小数或分数时间换算为整数采样，采用与文档投影相同的舍入方式。
+pub fn samples(time: &str, rate: u32) -> Result<u64> {
     let (clock, fraction) = time
         .split_once('.')
         .ok_or_else(|| Error::xml("无效 ADM 时间"))?;

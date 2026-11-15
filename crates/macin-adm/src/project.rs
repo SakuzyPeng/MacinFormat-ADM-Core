@@ -22,6 +22,39 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// 投影独立声道片段中的 block，沿用完整文档的时间、数值及范围检查。
+    /// `start` 是对象的绝对采样起点；此投影不包含 programme、对象和轨道。
+    pub fn extract_channel(doc: &Document, start: u64, locked: u32, rate: u32) -> Result<Self> {
+        if rate == 0 {
+            return Err(Error::invalid("采样率必须大于零"));
+        }
+        let channel = doc.xml.root as u32;
+        if doc.node(channel).local != "audioChannelFormat" {
+            return Err(Error::xml("声道投影需要 audioChannelFormat 根元素"));
+        }
+        let mut out = Self::default();
+        let kind = doc.type_of(channel)?;
+        for block in doc.children(channel, "audioBlockFormat") {
+            match kind {
+                3 => out
+                    .object_blocks
+                    .push(object_block(doc, block, start, locked, rate)?),
+                1 => {
+                    let mut block =
+                        out.direct_block(doc, block, channel, channel, start, locked, rate)?;
+                    block.pack_id = NONE;
+                    out.direct_blocks.push(block);
+                }
+                _ => {
+                    return Err(Error::unsupported(
+                        "声道片段投影仅支持 Objects / DirectSpeakers",
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn screen(doc: &Document, programme: u32) -> Result<AdmScreen> {
         let screens = doc.children(programme, "audioProgrammeReferenceScreen");
         if screens.len() > 1 {
