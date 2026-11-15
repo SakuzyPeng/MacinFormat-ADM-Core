@@ -483,6 +483,26 @@ fn damf_identity_fields_cannot_be_yaml_indicators_or_implicit_booleans() {
 }
 
 #[test]
+fn damf_drops_the_programme_name_without_reporting_a_loss() {
+    let t = Temp::new();
+    for profile in [Profile::DamfHome, Profile::DamfThreeDof] {
+        let out = t.path(&format!("named-{profile:?}"));
+        let spec = MasterSpec {
+            name: "Feature mix".into(),
+            ..spec(profile, 48000)
+        };
+        let mut writer = MasterWriter::create(&out, spec).unwrap();
+        writer
+            .write_block(PcmBlock::F32Interleaved(&pcm(480)), &[])
+            .unwrap();
+        let report = writer.finish().unwrap();
+        assert!(report.diagnostics.is_empty(), "{profile:?}");
+        let manifest = fs::read_to_string(out.join("master.atmos")).unwrap();
+        assert!(!manifest.contains("Feature mix"), "{profile:?}");
+    }
+}
+
+#[test]
 fn damf_stems_preserve_trailing_dots_and_spaces() {
     let tmp = Temp::new();
     for profile in [Profile::DamfHome, Profile::DamfThreeDof] {

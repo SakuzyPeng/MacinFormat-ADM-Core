@@ -255,3 +255,157 @@ fn convert_rejects_duplicate_metadata_keys_even_when_allowing_loss() {
     assert!(!out.exists());
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
 }
+
+/// An ADM Standard master of one object that moves once.
+fn adm(dir: &Path) -> PathBuf {
+    let path = dir.join("src.wav");
+    let spec = MasterSpec {
+        objects: vec![ObjectSpec::new(TrackId(1), "Voice")],
+        ..Default::default()
+    };
+    let mut writer = MasterWriter::create(&path, spec).unwrap();
+    let moves = ObjectUpdate {
+        track: TrackId(1),
+        sample: 1000,
+        ramp_samples: Some(480),
+        patch: ObjectPatch {
+            position: Some([0.5, 1., 0.]),
+            ..Default::default()
+        },
+    };
+    writer
+        .write_block(PcmBlock::F32Interleaved(&vec![0.25; 4800 * 11]), &[moves])
+        .unwrap();
+    writer.finish().unwrap();
+    path
+}
+
+#[test]
+fn convert_reads_adm_as_well_as_damf() {
+    let dir = Scratch::new();
+    let source = adm(&dir.0);
+    let (damf, logic) = (dir.path("damf"), dir.path("logic.wav"));
+    let output = mfadm(&[
+        "convert".as_ref(),
+        source.as_os_str(),
+        &to("home", &damf),
+        &to("logic", &logic),
+        "--fps".as_ref(),
+        "25".as_ref(),
+        "--json".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["source_profile"], "standard");
+    assert_eq!(report["objects"], 1);
+    assert_eq!(report["updates"], 1);
+    let manifest = std::fs::read_to_string(damf.join("master.atmos")).unwrap();
+    assert!(manifest.contains("fps: 25"), "{manifest}");
+    let metadata = std::fs::read_to_string(damf.join("master.atmos.metadata")).unwrap();
+    assert!(
+        metadata.contains("samplePos: 1000") && metadata.contains("rampLength: 480"),
+        "{metadata}"
+    );
+    assert_eq!(macin_format::chunks(&logic).unwrap().container, "RF64");
+
+    // The DAMF converts back; --fps belongs to ADM sources only.
+    let back = dir.path("back.wav");
+    let output = mfadm(&[
+        "convert".as_ref(),
+        damf.join("master.atmos").as_os_str(),
+        &to("standard", &back),
+        "--fps".as_ref(),
+        "25".as_ref(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--fps applies to ADM input"));
+    let output = mfadm(&[
+        "convert".as_ref(),
+        damf.join("master.atmos").as_os_str(),
+        &to("standard", &back),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&back).unwrap(),
+        std::fs::read(&source).unwrap()
+    );
+    assert_eq!(
+        mfadm(&[
+            "convert".as_ref(),
+            source.as_os_str(),
+            &to("home", &dir.path("x")),
+            "--fps=60".as_ref()
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
+    let dir = Scratch::new();
+    let source = adm(&dir.0);
+    let audio = dir.path("longer.wav");
+    let mut writer = macin_bwf::Writer::new(
+        std::fs::File::create(&audio).unwrap(),
+        macin_bwf::Format {
+            channels: 11,
+            sample_rate: 48_000,
+            sample_format: macin_bwf::SampleFormat::Pcm24,
+            channel_mask: None,
+        },
+        macin_bwf::WriterOptions::default(),
+    )
+    .unwrap();
+    writer.write_pcm_bytes(&vec![0; 9600 * 11 * 3]).unwrap();
+    writer.finish().unwrap();
+    let damf_path = dir.path("damf");
+    let adm_path = dir.path("longer-adm.wav");
+    let args = [
+        "convert".as_ref(),
+        source.as_os_str(),
+        "--audio".as_ref(),
+        audio.as_os_str(),
+        &to("home", &damf_path),
+        &to("standard", &adm_path),
+        "--json".as_ref(),
+    ];
+    let rejected = mfadm(&args);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("bed_timing"));
+    assert!(!damf_path.exists() && !adm_path.exists());
+    let mut allowed = args.to_vec();
+    allowed.push("--allow-loss".as_ref());
+    let output = mfadm(&allowed);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["updates"], 2);
+    assert_eq!(report["read_losses"][0]["field"], "bed_timing");
+    assert_eq!(report["outputs"][0]["frames"], 9600);
+    let damf = macin_atmos::damf::DamfReader::open(
+        damf_path.join("master.atmos"),
+        macin_atmos::LossPolicy::Reject,
+    )
+    .unwrap();
+    let last = damf.updates().unwrap().last().unwrap().unwrap();
+    assert_eq!((last.sample, last.patch.active), (4800, Some(false)));
+    let adm = macin_atmos::adm::AdmReader::open(adm_path, macin_atmos::LossPolicy::Reject).unwrap();
+    assert!(
+        adm.updates()
+            .iter()
+            .any(|u| u.sample == 4800 && u.patch.gain == Some(macin_atmos::Gain::Linear(0.)))
+    );
+}

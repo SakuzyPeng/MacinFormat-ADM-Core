@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 
 use clap::{Args, Parser, Subcommand};
-use macin_atmos::{LossPolicy, Target};
-use macin_format::convert::{ConvertReport, Loss, parse_profile};
+use macin_atmos::{FrameRate, LossPolicy, Target};
+use macin_format::convert::{ConvertReport, Loss, parse_frame_rate, parse_profile};
 use macin_format::{
     AdmReport, ChunksReport, DEFAULT_METADATA_BUDGET, Error, InfoReport, Result, timecode,
 };
@@ -40,17 +40,21 @@ enum Command {
         #[command(flatten)]
         budget: Budget,
     },
-    /// Write a DAMF master, or DAMF metadata with a WAV, to one or more profiles in one pass.
+    /// Write a DAMF master or an ADM BWF to one or more profiles in one pass.
     Convert {
-        /// The DAMF manifest (`.atmos`).
-        manifest: PathBuf,
+        /// The source: a DAMF manifest (`.atmos`) or an ADM BWF (told apart by its contents).
+        source: PathBuf,
         /// An output as PROFILE=PATH, where PROFILE is standard, logic, home or 3dof. Repeat it
         /// to write several outputs from one pass; a DAMF PATH becomes a directory.
         #[arg(long = "to", value_name = "PROFILE=PATH", required = true, value_parser = target)]
         to: Vec<Target>,
-        /// Use this WAV in place of the DAMF audio; its channel n carries DAMF ID n.
+        /// Use this WAV in place of the source's audio; its channel n carries DAMF ID n, or ADM
+        /// track n + 1.
         #[arg(long, value_name = "WAV")]
         audio: Option<PathBuf>,
+        /// The frame rate an ADM source's outputs declare (ADM carries none; default 24).
+        #[arg(long, value_name = "FPS", value_parser = frame_rate)]
+        fps: Option<FrameRate>,
         /// Drop what a profile cannot hold and report it, instead of failing.
         #[arg(long)]
         allow_loss: bool,
@@ -58,6 +62,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+fn frame_rate(value: &str) -> std::result::Result<FrameRate, String> {
+    parse_frame_rate(value).map_err(|e| e.message)
 }
 
 fn target(value: &str) -> std::result::Result<Target, String> {
@@ -124,9 +132,10 @@ fn run(cli: Cli) -> Result<()> {
             text_adm,
         ),
         Command::Convert {
-            manifest,
+            source,
             to,
             audio,
+            fps,
             allow_loss,
             json,
         } => {
@@ -135,7 +144,8 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 LossPolicy::Reject
             };
-            let report = macin_format::convert::convert(&manifest, audio.as_deref(), &to, policy)?;
+            let report =
+                macin_format::convert::convert(&source, audio.as_deref(), &to, policy, fps)?;
             emit(&mut out, &report, json, text_convert)
         }
         Command::Axml { file, budget } => {

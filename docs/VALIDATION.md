@@ -21,6 +21,20 @@
 - 规模：118 个对象、70.8 万个事件、60 秒 48 kHz 的 DAMF，一次转成 Standard、Logic、3dof 三份（约 1.1–1.4 GB 一份），release 构建 23 秒，峰值内存 12 MiB。
 - 尚未进行：用 Dolby Conversion Tool 产出的 DAMF 作为第三方输入做读回验证。上面的第三方写法是手写的，不能替代真实工具的输出。
 
+## ADM 读取与转换
+
+日期：2026-11-15，Linux x64 / Rust 1.98；macOS arm64 与 Windows x64 待 CI。
+
+- workspace：fmt、Clippy（所有 target、警告视为错误）与全部测试通过；不开 `read` 的 `macin-atmos` 单独检查通过。
+- `macin-adm` 新增按节点号只读访问原始元素的接口，不改动 `#[repr(C)]` 记录；越界节点号返回空值而不 panic。
+- ADM → 同一配置：本库写出的 Standard 与 Logic（默认帧率与 DBMD 字段）读回再写，整个文件逐字节一致。
+- ADM → DAMF → ADM：位置不超过 9 位小数、增益为 1 或静音、默认节目名时逐字节回到原文件；带 dB 增益时经 DAMF 的增益误差小于 1e-9。
+- 手写的第三方 ADM：只在 CHNA 中定义轨道、bed 声道顺序颠倒、每个对象一个 content、对象 `start` / `duration`、未写 `jumpPosition` 的整块插值、dB 增益与对象级增益折算、`mute`；按声道标记值核对了输出声道顺序。
+- 损失与拒绝：逐项覆盖 README 列出的损失字段，以及极坐标、block 空隙、多个 programme、嵌套对象、非 7.1.2 bed 和没有 axml 的文件。
+- 预读过的音频与来自 DAMF 读取器的音频，转换结果与直接转换逐字节相同。
+- 规模：118 个对象、11.8 万个事件、10 秒的 ADM（AXML 57.8 MB），转 DAMF 用时 2.2 秒，峰值内存 642 MiB，约为 AXML 大小的 11 倍。同一 DAMF 经 ADM 再转回 DAMF，清单与音频逐字节一致；元数据里每个对象有一个事件不同，原因是其 ramp 延伸到音频结尾之后，ADM 只记录到结尾为止。
+- 尚未进行：读取其他工具实际产出的 ADM BWF。上面的第三方写法是手写的。
+
 ## 外部互操作
 
 Dolby Atmos Conversion Tool 2.1.2_07765940、DME 随附 atmos_info、EBU EAR 2.1.0 与 mradm Release。

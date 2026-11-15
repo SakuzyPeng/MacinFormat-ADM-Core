@@ -6,7 +6,7 @@
 
 A Rust library that **only deals with file formats**: it parses, projects and writes back ADM XML, reads and
 writes RIFF/RF64/BW64 containers, streams object audio into Atmos masters as ADM BWF or DAMF, and reads DAMF
-back into the same model to convert it to another profile. It gathers
+and ADM BWF back into the same model to convert them to another profile. It gathers
 in one place the format code that the renderer, the decoder's export path, object clustering and encoding
 tools each used to carry their own copy of; scene models and algorithms stay with each consumer.
 
@@ -24,6 +24,7 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 - [Master writing rules](#master-writing-rules)
 - [The four master profiles](#the-four-master-profiles)
 - [Reading and converting DAMF](#reading-and-converting-damf)
+- [Reading and converting ADM](#reading-and-converting-adm)
 - [Semantic loss and diagnostics](#semantic-loss-and-diagnostics)
 - [Out of scope](#out-of-scope)
 - [Development and acceptance](#development-and-acceptance)
@@ -49,9 +50,9 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
   atomically on completion.
 - **Write several at once**: `MultiWriter` writes one model to several profiles, ADM and DAMF side by side, in
   a single pass.
-- **Read DAMF and convert it**: `damf::DamfReader` reads DAMF back into the writing model and converts it to
-  any profile; the audio can be swapped for a WAV, which is how a master is written from a WAV plus DAMF
-  metadata.
+- **Read DAMF or ADM and convert it**: `damf::DamfReader` and `adm::AdmReader` read DAMF or an ADM BWF back
+  into the writing model and convert it to any profile (ADM to DAMF, DAMF to ADM, or between profiles of one
+  kind); the audio can be swapped for a WAV, which is how a master is written from a WAV plus metadata.
 - **From the command line**: `mfadm` lists chunks, the audio format, `chna` and an ADM summary, and converts
   DAMF, with JSON output.
 
@@ -59,14 +60,15 @@ tools each used to carry their own copy of; scene models and algorithms stay wit
 
 | Crate | Entry points | Responsibility |
 | --- | --- | --- |
-| `macin-adm` | `Document`, `Snapshot`, `Patch`, `generate` | ADM XML, reference resolution, Objects/DirectSpeakers/HOA projection, generation and source-preserving write-back |
+| `macin-adm` | `Document`, `Snapshot`, `Patch`, `generate` | ADM XML, reference resolution, Objects/DirectSpeakers/HOA projection, generation and source-preserving write-back; read-only access to the literal elements by `Snapshot` node number |
 | `macin-bwf` | `Reader`, `ChunkReader`, `Writer`, `Chna` | RIFF/RF64/BW64, PCM and container edits; does not interpret ADM XML |
-| `macin-atmos` | `MasterSpec`, `MasterWriter`, `MultiWriter`; `damf::DamfReader` (feature `read`) | Source-agnostic ADM BWF / DAMF master writing, and DAMF reading and conversion; builds on the other two |
+| `macin-atmos` | `MasterSpec`, `MasterWriter`, `MultiWriter`; `damf::DamfReader`, `adm::AdmReader` (feature `read`) | Source-agnostic ADM BWF / DAMF master writing, and DAMF / ADM reading and conversion; builds on the other two |
 
 All three forbid unsafe code (`unsafe_code = "forbid"`). Their only dependencies are `quick-xml`, `libm` and
-`renamore`, each pinned to an exact version. Reading DAMF needs a YAML parser, so it sits behind the `read`
-feature, off by default; only turning it on brings in `saphyr-parser` (pinned as well), and consumers that
-only write keep their dependency graph.
+`renamore`, each pinned to an exact version. Both readers sit behind the `read` feature, off by default.
+Reading DAMF needs a YAML parser, and only turning the feature on brings in `saphyr-parser` (pinned as well);
+reading ADM needs nothing more, but shares the DAMF conversion path. Consumers that only write keep their
+dependency graph.
 
 A fourth, unpublished crate, `macin-format`, provides the [`mfadm`](#the-mfadm-command) command;
 its extra dependencies, `clap` and `serde_json`, never reach the three libraries.
@@ -236,7 +238,7 @@ cargo install --locked --path crates/macin-format
 | `mfadm info <file>` | Sample rate, channels, bit depth, frames and duration, and the `chna` track table |
 | `mfadm adm <file>` | Resolves the ADM against the file's own `chna` and sample rate and summarises programmes, contents, objects, tracks and blocks, listing any skipped `typeDefinition` |
 | `mfadm axml <file>` | Writes the `axml` chunk to stdout byte for byte, for comparison with external tools |
-| `mfadm convert <x.atmos> --to PROFILE=PATH …` | Writes a DAMF master to one or more profiles in one pass; `--audio <wav>` takes the audio from a WAV, `--allow-loss` degrades and lists the losses |
+| `mfadm convert <x.atmos or x.wav> --to PROFILE=PATH …` | Writes a DAMF master or an ADM BWF (told apart by its contents) to one or more profiles in one pass; `--audio <wav>` takes the audio from a WAV, `--fps` sets an ADM source's frame rate, `--allow-loss` degrades and lists the losses |
 
 `chunks`, `info`, `adm` and `convert` take `--json` for machine-readable output. `adm` and `axml` read metadata within a
 budget, 256 MiB by default, adjustable with `--max-metadata <MiB>`. Failures exit with 1, usage errors with 2.
@@ -347,6 +349,47 @@ unchanged, and what the model cannot hold while reading follows the same `LossPo
 - Conversion writes this library's own creation tool fields; the source's `creationTool` is available from
   `creation_tool()` and is never passed off as the new file's.
 
+## Reading and converting ADM
+
+This needs the `read` feature. `AdmReader::open` reads an ADM BWF into the same `MasterSpec` and
+`ObjectUpdate`s writing takes, and `convert` writes through `MultiWriter` as well, so ADM to DAMF is ordinary
+writing and the DAMF side's loss checks apply unchanged. The subset read is the Atmos one: the structure this
+library writes, and the same shape from other tools.
+
+- **Supported structure**: one programme; at most one 7.1.2 `DirectSpeakers` bed whose channels are labelled
+  `RC_L` … `RC_Rts` (or without `RC_`), in any order; any number of single-track Cartesian `Objects`; track
+  definitions may live in CHNA alone. A Logic RF64 (with DBMD) reads as `Logic`, anything else as `Standard`.
+- **Precision**: positions, sizes and the rest are parsed from the document text as `f64` rather than taken
+  from the `f32` `Snapshot` projection, so a Standard master this library wrote reads back and rewrites byte for
+  byte. A Logic source's DBMD frame rate and creator fields are not read back; written with the same ones, it
+  rewrites byte for byte too.
+- **Timeline**: each block stands on its own, and an element it leaves out takes its default. A block's start
+  becomes one update carrying only the fields that differ from the previous block; with `jumpPosition` 1 the
+  ramp is `interpolationLength` (at most the block), and without `jumpPosition` it spans the whole block. An
+  object's `start` / `duration` become activating and deactivating updates. Object-level `gain` multiplies into
+  every block and `mute` reads as silence. ADM has no active flag: the writer spells an inactive object as gain
+  0, which reads back as silent gain.
+- **IDs and channels**: objects are ordered by track, and an object's `TrackId` is its 1-based track in the
+  file; with `wave_audio` in place of the file's audio, channel n carries track n + 1. A file without a bed is
+  written with a silent bed.
+- **Handled as loss**: block elements with no mapping such as `zoneExclusion` (`unknown_field`), nonzero
+  `diffuse` and `objectDivergence`, `headLocked` (`head_tracking`), `channelLock` with `maxDistance`, an
+  object's `positionOffset`, `dialogue`, object-level `importance` other than 10, `interact` /
+  `disableDucking`, programme or content loudness, language, labels and dialogue classification, a nonzero
+  programme start, and gain or `headLocked` on bed channels or a bed that does not span the programme.
+- **Refused outright**: several programmes, several beds, an incomplete or non-7.1.2 bed, polar objects,
+  multi-channel `Objects`, nested objects, HOA and other `typeDefinition`s, gaps or overlaps between blocks, and
+  files without `axml` / `chna`.
+- **Frame rate**: ADM carries none, and a Logic source's DBMD frame rate is not read back; outputs default to
+  24 fps, set with `with_frame_rate` (or `mfadm convert --fps`). DBMD's creator fields are not read back either;
+  outputs carry this library's own.
+- **What DAMF does not hold**: DAMF has no programme name. The name is descriptive, so writing DAMF leaves it
+  out without reporting a loss, and ADM through DAMF and back returns the default name. `screenRef`, by
+  contrast, is a loss when writing DAMF. The other way, a DAMF ramp that runs past the end of the audio
+  is cut at the end in ADM and reads back as the shortened ramp to the value reached there.
+- **Memory**: `macin-adm` parses the AXML whole, so memory grows with the metadata. A 57.8 MB AXML (118
+  objects, 118,000 events) peaked at about 640 MiB; DAMF reading streams.
+
 ## Semantic loss and diagnostics
 
 The default is `LossPolicy::Reject`: semantics that cannot be expressed exactly are an error. Only `Allow`
@@ -359,13 +402,14 @@ applies explicit degradations, each recorded as a `MappingDiagnostic`.
 - The verified DAMF headphone values are undefined / off / near / far; Mid is either rejected explicitly or
   degraded to undefined.
 - ADM importance is quantised to 0..10, and scores that are not a multiple of ten report a loss.
-- 24-bit audio quantisation and the precision of the chosen clock are declared format behaviour, not loss.
+- 24-bit audio quantisation and the precision of the chosen clock are declared format behaviour, not loss;
+  neither is DAMF leaving out the programme name.
 
 ## Out of scope
 
 - No multi-bed authoring, resampling, rendering or encoding algorithms (first release).
-- ADM cannot be read into the master model yet, so ADM to DAMF is not supported; DAMF to ADM and between DAMF
-  profiles is.
+- ADM reading covers only the Atmos subset above; polar positions, HOA, several beds and nested objects are not
+  converted.
 - No rendering, clustering or coding; no C ABI.
 - `mfadm` never modifies an input or overwrites an output; conversion losses follow `LossPolicy` exactly as
   writing does, rejecting by default.
@@ -390,7 +434,11 @@ The tests use standalone XML/WAVE fixtures and cover block-size invariance, ramp
 sample rates, atomic failure, and a virtual 4 GiB boundary check that creates no huge file. The DAMF reading
 tests require DAMF to DAMF to restore all three members byte for byte and DAMF to ADM to match writing ADM
 directly byte for byte, and cover hand-written third-party YAML, channel reordering, a WAV in place of the
-audio, and every kind of loss and refusal. The native
+audio, and every kind of loss and refusal. The ADM reading tests require ADM to the same profile to restore
+the file byte for byte and ADM through DAMF and back to match byte for byte, and cover third-party files whose
+tracks are defined only in CHNA, object start and duration, whole-block interpolation, dB and object-level
+gain, channel reordering, every kind of loss and refusal, and audio that was read ahead or opened by another
+reader. The native
 verification platforms are macOS arm64 and Windows x64, and CI runs the same checks on both.
 
 ## Interoperability with external tools
