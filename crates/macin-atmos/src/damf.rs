@@ -883,7 +883,12 @@ impl DamfReader {
     /// The source's own `.atmos.audio`.
     pub fn audio(&self) -> Result<AudioSource> {
         let caf = CafReader::open(&self.audio)?;
-        AudioSource::new(self, Input::Caf(caf))
+        AudioSource::new(
+            self.spec.sample_rate,
+            &self.channels,
+            "DAMF ID",
+            Input::Caf(caf),
+        )
     }
     /// A WAV file in place of the source's audio, with channel `n` carrying DAMF ID `n`.
     /// 16- and 24-bit PCM convert exactly; 32-bit PCM and float are quantised to 24 bits, and
@@ -892,43 +897,72 @@ impl DamfReader {
         let path = path.as_ref();
         let file = File::open(path).map_err(|e| located(path, e.into()))?;
         let wave = Reader::new(BufReader::new(file)).map_err(|e| located(path, e.into()))?;
-        AudioSource::new(self, Input::Wave(wave))
+        AudioSource::new(
+            self.spec.sample_rate,
+            &self.channels,
+            "DAMF ID",
+            Input::Wave(wave),
+        )
     }
 
     /// 通过 [`MultiWriter`] 一次写出所有目标，DAMF 目标保留来源的 stem。
     /// 转换从音频起点重新读取，并按当前 reader 核对采样率、重建声道映射。
     pub fn convert(&self, audio: AudioSource, targets: &[Target]) -> Result<Conversion> {
-        let mut audio = AudioSource::new(self, audio.input)?;
-        if audio.frames == 0 {
-            return Err(Error::invalid("The audio is empty"));
-        }
-        if self.last_sample.is_some_and(|s| s >= audio.frames) {
-            return Err(Error::invalid(format!(
-                "Metadata reaches sample {} but the audio has {} frames",
-                self.last_sample.unwrap_or_default(),
-                audio.frames
-            )));
-        }
-        audio.rewind()?;
-        let mut writer = MultiWriter::create(&self.spec, targets)?;
-        let mut batch = Vec::with_capacity(UPDATE_BATCH);
-        for update in self.updates()? {
-            batch.push(update?);
-            if batch.len() == UPDATE_BATCH {
-                writer.schedule_updates(&batch)?;
-                batch.clear();
-            }
-        }
-        writer.schedule_updates(&batch)?;
-        let mut pcm = Vec::new();
-        while audio.read_s24(AUDIO_BLOCK, &mut pcm)? > 0 {
-            writer.write_block(PcmBlock::S24Le(&pcm), &[])?;
-        }
-        Ok(Conversion {
-            read: self.diagnostics.clone(),
-            outputs: writer.finish()?,
-        })
+        let audio = AudioSource::new(
+            self.spec.sample_rate,
+            &self.channels,
+            "DAMF ID",
+            audio.input,
+        )?;
+        write_conversion(
+            &self.spec,
+            self.updates()?,
+            audio,
+            self.last_sample,
+            &self.diagnostics,
+            targets,
+        )
     }
+}
+
+/// The conversion both readers share: check the audio covers the metadata, rewind it, schedule
+/// every update, then stream the audio through one [`MultiWriter`].
+pub(crate) fn write_conversion(
+    spec: &MasterSpec,
+    updates: impl IntoIterator<Item = Result<ObjectUpdate>>,
+    mut audio: AudioSource,
+    last_sample: Option<u64>,
+    read: &[MappingDiagnostic],
+    targets: &[Target],
+) -> Result<Conversion> {
+    if audio.frames == 0 {
+        return Err(Error::invalid("The audio is empty"));
+    }
+    if let Some(last) = last_sample.filter(|s| *s >= audio.frames) {
+        return Err(Error::invalid(format!(
+            "Metadata reaches sample {last} but the audio has {} frames",
+            audio.frames
+        )));
+    }
+    audio.rewind()?;
+    let mut writer = MultiWriter::create(spec, targets)?;
+    let mut batch = Vec::with_capacity(UPDATE_BATCH);
+    for update in updates {
+        batch.push(update?);
+        if batch.len() == UPDATE_BATCH {
+            writer.schedule_updates(&batch)?;
+            batch.clear();
+        }
+    }
+    writer.schedule_updates(&batch)?;
+    let mut pcm = Vec::new();
+    while audio.read_s24(AUDIO_BLOCK, &mut pcm)? > 0 {
+        writer.write_block(PcmBlock::S24Le(&pcm), &[])?;
+    }
+    Ok(Conversion {
+        read: read.to_vec(),
+        outputs: writer.finish()?,
+    })
 }
 
 /// The second pass. Each item is one [`ObjectUpdate`], ready for `schedule_updates`.
@@ -1096,7 +1130,7 @@ impl CafReader {
     }
 }
 
-enum Input {
+pub(crate) enum Input {
     Caf(CafReader),
     Wave(Reader<BufReader<File>>),
 }
@@ -1112,7 +1146,7 @@ impl std::fmt::Debug for Input {
 /// Audio for conversion, delivered in the reader's output channel order as S24LE.
 #[derive(Debug)]
 pub struct AudioSource {
-    input: Input,
+    pub(crate) input: Input,
     /// Source channel per output channel; `None` is a silent bed slot.
     map: Vec<Option<usize>>,
     source_channels: usize,
@@ -1122,7 +1156,14 @@ pub struct AudioSource {
     mapped: Vec<f32>,
 }
 impl AudioSource {
-    fn new(reader: &DamfReader, input: Input) -> Result<Self> {
+    /// `map` gives the source channel (0-based) feeding each output channel; `None` is silence.
+    /// `what` names a source channel in the error for one that is missing ("DAMF ID", say).
+    pub(crate) fn new(
+        sample_rate: u32,
+        map: &[Option<u32>],
+        what: &str,
+        input: Input,
+    ) -> Result<Self> {
         let (rate, channels, frames) = match &input {
             Input::Caf(caf) => (caf.sample_rate, caf.channels, caf.frames),
             Input::Wave(wave) => {
@@ -1134,22 +1175,17 @@ impl AudioSource {
                 )
             }
         };
-        if rate != reader.spec.sample_rate {
+        if rate != sample_rate {
             return Err(Error::invalid(format!(
-                "Audio is {rate} Hz but the metadata is {} Hz",
-                reader.spec.sample_rate
+                "Audio is {rate} Hz but the metadata is {sample_rate} Hz"
             )));
         }
-        let map: Vec<Option<usize>> = reader
-            .channels
-            .iter()
-            .map(|c| c.map(|id| id as usize))
-            .collect();
+        let map: Vec<Option<usize>> = map.iter().map(|c| c.map(|id| id as usize)).collect();
         if let Some(highest) = map.iter().flatten().max()
             && *highest >= channels
         {
             return Err(Error::invalid(format!(
-                "DAMF ID {highest} needs audio channel {highest}, but the audio has {channels} channels"
+                "{what} {highest} needs audio channel {highest}, but the audio has {channels} channels"
             )));
         }
         Ok(Self {

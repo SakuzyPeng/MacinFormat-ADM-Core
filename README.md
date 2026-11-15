@@ -5,7 +5,7 @@
 **ADM/BWF 读写与 Atmos 母版写入的 Rust 基础库** · Rust 2024 · MSRV 1.98 · MIT
 
 一个**只管文件格式**的 Rust 库：解析、投影和回写 ADM XML，读写 RIFF/RF64/BW64 容器，并把对象音频流式写成
-ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 读回同一个模型、转换到其他配置。它把渲染、解码导出、对象聚类和编码工具原本各写一份的格式代码集中到一处；
+ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 和 ADM BWF 读回同一个模型、转换到其他配置。它把渲染、解码导出、对象聚类和编码工具原本各写一份的格式代码集中到一处；
 场景模型和算法仍由各消费方自己负责。
 
 > 它不是渲染器、解码器或编码器：不含任何音频算法，不导出 C ABI，也不依赖 AC-4、聚类实现或规范派生表。
@@ -21,6 +21,7 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 读回同一个模型�
 - [母版写入规则](#母版写入规则)
 - [四种母版配置](#四种母版配置)
 - [DAMF 读取与转换](#damf-读取与转换)
+- [ADM 读取与转换](#adm-读取与转换)
 - [语义损失与诊断](#语义损失与诊断)
 - [不做什么](#不做什么)
 - [开发与验收](#开发与验收)
@@ -42,21 +43,21 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 读回同一个模型�
 - **写 Atmos 母版**：固定 7.1.2 bed 加最多 118 个对象，分块写入 PCM 和对象元数据更新，
   输出 Standard BW64、Logic RF64、DAMF home 或 DAMF 3DoF，完成后原子提交。
 - **一次写出多份**：`MultiWriter` 把同一个模型在一次写入里同时输出成 ADM 和 DAMF 等多种配置。
-- **读 DAMF、转换配置**：`damf::DamfReader` 把 DAMF 读回写入用的模型，转成任意配置；音频也可以换成一个 WAV，
-  即“WAV 加 DAMF 元数据”写母版。
+- **读 DAMF / ADM、转换配置**：`damf::DamfReader` 和 `adm::AdmReader` 把 DAMF 或 ADM BWF 读回写入用的模型，
+  转成任意配置（ADM 转 DAMF、DAMF 转 ADM、同类配置互转）；音频也可以换成一个 WAV，即“WAV 加元数据”写母版。
 - **命令行**：`mfadm` 列出 chunk、音频格式、`chna` 和 ADM 摘要，并能做 DAMF 转换，可输出 JSON。
 
 ## 三个 crate
 
 | crate | 入口 | 负责 |
 | --- | --- | --- |
-| `macin-adm` | `Document`、`Snapshot`、`Patch`、`generate` | ADM XML、引用解析、Objects/DirectSpeakers/HOA 投影、生成与保留原文的回写 |
+| `macin-adm` | `Document`、`Snapshot`、`Patch`、`generate` | ADM XML、引用解析、Objects/DirectSpeakers/HOA 投影、生成与保留原文的回写；按 `Snapshot` 节点号只读访问原始元素 |
 | `macin-bwf` | `Reader`、`ChunkReader`、`Writer`、`Chna` | RIFF/RF64/BW64、PCM 与容器编辑；不解释 ADM XML |
-| `macin-atmos` | `MasterSpec`、`MasterWriter`、`MultiWriter`；`damf::DamfReader`（`read` feature） | 来源无关的 ADM BWF / DAMF 母版写入，以及 DAMF 读取与转换；依赖前两者 |
+| `macin-atmos` | `MasterSpec`、`MasterWriter`、`MultiWriter`；`damf::DamfReader`、`adm::AdmReader`（`read` feature） | 来源无关的 ADM BWF / DAMF 母版写入，以及 DAMF / ADM 读取与转换；依赖前两者 |
 
 三者都禁止 unsafe（`unsafe_code = "forbid"`），依赖只有 `quick-xml`、`libm` 和 `renamore`，版本全部锁定。
-DAMF 读取需要 YAML 解析，放在默认关闭的 `read` feature 后面，只有打开它才会引入 `saphyr-parser`（同样锁定版本）；
-只写母版的消费方依赖图不变。
+两个读取器放在默认关闭的 `read` feature 后面。DAMF 读取需要 YAML 解析，只有打开它才会引入 `saphyr-parser`
+（同样锁定版本）；ADM 读取不需要额外依赖，但与 DAMF 共用同一套转换流程。只写母版的消费方依赖图不变。
 
 另有不发布的 `macin-format`，提供命令行工具 [`mfadm`](#命令行工具-mfadm)；它额外依赖 `clap` 和 `serde_json`，
 这些依赖不会进入三个库。
@@ -224,7 +225,7 @@ cargo install --locked --path crates/macin-format
 | `mfadm info <file>` | 采样率、声道数、位深、帧数与时长，`chna` 里的轨道对应关系 |
 | `mfadm adm <file>` | 按文件自身的 `chna` 和采样率解析 ADM，汇总 programme、content、object、轨道与 block，列出被跳过的 `typeDefinition` |
 | `mfadm axml <file>` | 把 `axml` chunk 原样写到 stdout，方便和外部工具的结果做对比 |
-| `mfadm convert <x.atmos> --to PROFILE=PATH …` | 把 DAMF 一次写成一种或多种配置；`--audio <wav>` 改用 WAV 作音频，`--allow-loss` 允许降级并列出损失 |
+| `mfadm convert <x.atmos 或 x.wav> --to PROFILE=PATH …` | 把 DAMF 或 ADM BWF（按文件内容区分）一次写成一种或多种配置；`--audio <wav>` 改用 WAV 作音频，`--fps` 指定 ADM 来源的帧率，`--allow-loss` 允许降级并列出损失 |
 
 `chunks`、`info`、`adm`、`convert` 加 `--json` 输出机器可读的 JSON，供脚本使用。`adm` 和 `axml` 读元数据时有预算，
 默认 256 MiB，可用 `--max-metadata <MiB>` 调整。出错时退出码为 1，参数错误为 2。
@@ -317,6 +318,37 @@ film/master.atmos (home): 2 objects, 3 updates
   YAML 锚点/别名/标签和多文档、非 S24LE 的 CAF、时间倒退或引用未声明 ID 的事件、元数据超出音频长度。
 - 转换写入的是本库自己的创建工具字段；源文件的 `creationTool` 可通过 `creation_tool()` 查看，不会被冒用。
 
+## ADM 读取与转换
+
+需要 `read` feature。`AdmReader::open` 把 ADM BWF 读成与写入时相同的 `MasterSpec` 和一组 `ObjectUpdate`，
+`convert` 同样经 `MultiWriter` 写出，所以 ADM 转 DAMF 就是普通的写入，DAMF 一侧的损失检查照常生效。
+支持的是 Atmos 子集：本库写出的结构，以及其他工具写出的同类结构。
+
+- **支持的结构**：一个 programme；至多一个 7.1.2 `DirectSpeakers` bed，声道用 `RC_L`…`RC_Rts`（或不带 `RC_`）
+  标记，顺序不限；任意个单轨、Cartesian 坐标的 `Objects`；轨道定义可以只写在 CHNA 里。Logic RF64（带 DBMD）读成
+  `Logic`，其余读成 `Standard`。
+- **数值精度**：位置、尺寸等从文档原文按 `f64` 解析，而不是取 `Snapshot` 里的 `f32` 投影，所以本库写出的
+  ADM 读回再写，Standard 与原文件逐字节一致。Logic 的 DBMD 帧率和创建者字段不读回，按同样的帧率与字段写出时
+  也逐字节一致。
+- **时间线**：每个 block 自成一体，没写的元素取缺省值。block 起点成为一次更新，只包含与前一个 block 不同的字段；
+  `jumpPosition` 为 1 时 ramp 取 `interpolationLength`（不超过 block 长度），没写 `jumpPosition` 时在整个 block 内插值。
+  对象的 `start` / `duration` 变成激活与停用的更新。对象级 `gain` 乘进每个 block，`mute` 读成静音。
+  ADM 没有 active 标志：写入器把不活动的对象写成 gain 0，读回就是静音增益。
+- **ID 与声道**：对象按轨道号排序，`TrackId` 是对象在文件里的轨道号（从 1 起）；`wave_audio` 用 WAV 代替音频时，
+  第 n 个声道对应第 n + 1 条轨道。没有 bed 的文件写出一组静音 bed。
+- **按损失处理**：`zoneExclusion` 等没有映射的 block 元素（`unknown_field`）、非零 `diffuse`、`objectDivergence`、
+  `headLocked`（`head_tracking`）、带 `maxDistance` 的 `channelLock`、对象的 `positionOffset`、`dialogue`、
+  非 10 的对象级 `importance`、`interact` / `disableDucking`，programme / content 的响度、语言、标签和对白分类，
+  非零的 programme 起点，以及 bed 声道上的增益、`headLocked` 和不覆盖整个节目的 bed。
+- **直接拒绝**：多个 programme、多个 bed、不完整或非 7.1.2 的 bed、极坐标对象、多声道 `Objects`、嵌套对象、
+  HOA 等其他 `typeDefinition`、block 之间有空隙或重叠，以及没有 `axml` / `chna` 的文件。
+- **帧率**：ADM 不带帧率，Logic 的 DBMD 帧率也不读回；输出默认 24 fps，用 `with_frame_rate`（或 `mfadm convert --fps`）指定。
+  DBMD 的创建者字段同样不读回，输出写本库自己的值。
+- **DAMF 装不下的**：DAMF 没有节目名字段，ADM 转 DAMF 再转回时节目名回到默认值；`screenRef` 写 DAMF 时按损失处理。
+  反过来，DAMF 里延伸到音频结尾之后的 ramp 在 ADM 中被截在结尾，读回是截短的 ramp 与当时的插值位置。
+- **内存**：AXML 由 `macin-adm` 整体解析，内存随元数据规模增长。实测 57.8 MB 的 AXML（118 个对象、11.8 万个事件）
+  峰值约 640 MiB；DAMF 读取则是流式的。
+
 ## 语义损失与诊断
 
 默认 `LossPolicy::Reject`：无法精确表达的语义直接报错。只有选 `Allow` 才采用明确的降级，并记录在
@@ -331,7 +363,7 @@ film/master.atmos (home): 2 objects, 3 updates
 ## 不做什么
 
 - 不做多 bed 制作、重采样、渲染或编码算法（首版）。
-- 还不能把 ADM 读成母版模型，因此暂不支持 ADM 转 DAMF；DAMF 转 ADM、DAMF 配置互转已支持。
+- ADM 读取只支持上面的 Atmos 子集；极坐标、HOA、多 bed 与嵌套对象不做转换。
 - 不做渲染、聚类或编解码；不导出 C ABI。
 - `mfadm` 不修改输入、不覆盖输出；转换的损失与写入一样按 `LossPolicy` 处理，默认拒绝。
 - 不在文件里伪造创建工具来源：即使某个外部检查器因此拒绝，也保留真实创建者（见下文）。
@@ -352,7 +384,9 @@ cargo test --locked -p macin-atmos
 
 测试使用独立的 XML/WAVE 夹具，覆盖分块一致性、ramp、四种配置与两种采样率、原子失败，以及不创建巨型文件的
 虚拟 4 GiB 边界检查。DAMF 读取的测试要求 DAMF 转 DAMF 三个成员逐字节复原、DAMF 转 ADM 与直接写 ADM 逐字节一致，
-并覆盖手写的第三方 YAML 写法、声道重排、WAV 代替音频、各类损失与拒绝。原生验证平台为 macOS arm64 与 Windows x64，CI 在这两个平台上跑同一套检查。
+并覆盖手写的第三方 YAML 写法、声道重排、WAV 代替音频、各类损失与拒绝。ADM 读取的测试要求 ADM 转同一配置逐字节复原、
+ADM 经 DAMF 再转回 ADM 逐字节一致，并覆盖只靠 CHNA 定义轨道的第三方写法、对象起止时间、整块插值、dB 与对象级增益、
+声道重排、各类损失与拒绝，以及预读过或来自其他读取器的音频。原生验证平台为 macOS arm64 与 Windows x64，CI 在这两个平台上跑同一套检查。
 
 ## 外部工具互操作
 

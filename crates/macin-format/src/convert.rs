@@ -1,8 +1,10 @@
-//! `mfadm convert`: a DAMF master, or DAMF metadata with a WAV, written to one or more profiles
-//! in a single pass. Inputs are only read; outputs must not exist yet.
+//! `mfadm convert`: a DAMF master or an ADM BWF, optionally with its audio taken from a WAV,
+//! written to one or more profiles in a single pass. Inputs are only read; outputs must not exist
+//! yet.
 use crate::{Error, Result};
+use macin_atmos::adm::AdmReader;
 use macin_atmos::damf::DamfReader;
-use macin_atmos::{LossPolicy, MappingDiagnostic, Profile, Target};
+use macin_atmos::{FrameRate, LossPolicy, MappingDiagnostic, Profile, Target};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -96,26 +98,79 @@ pub struct ConvertReport {
     pub outputs: Vec<Output>,
 }
 
-/// Convert `manifest` to every target. `audio` replaces the DAMF audio with a WAV whose channel
-/// `n` carries DAMF ID `n`.
+/// The frame rate names `--fps` accepts, as DAMF spells them.
+pub fn parse_frame_rate(name: &str) -> Result<FrameRate> {
+    Ok(match name {
+        "23.976" => FrameRate::Fps23976,
+        "24" => FrameRate::Fps24,
+        "25" => FrameRate::Fps25,
+        "29.97" => FrameRate::Fps2997,
+        "29.97df" => FrameRate::Fps2997Drop,
+        "30" => FrameRate::Fps30,
+        _ => {
+            return Err(Error::msg(format!(
+                "unknown frame rate {name:?} (23.976, 24, 25, 29.97, 29.97df or 30)"
+            )));
+        }
+    })
+}
+
+/// Is `path` a RIFF/RF64/BW64 file (an ADM BWF) rather than a DAMF manifest?
+fn is_wave(path: &Path) -> Result<bool> {
+    let mut magic = [0; 4];
+    let mut file = std::fs::File::open(path).map_err(|e| Error {
+        message: format!("{}: {e}", path.display()),
+        io_kind: Some(e.kind()),
+    })?;
+    let read = std::io::Read::read(&mut file, &mut magic)?;
+    Ok(read == 4 && matches!(&magic, b"RIFF" | b"RF64" | b"BW64"))
+}
+
+/// Convert `source`, a DAMF manifest or an ADM BWF, to every target. `audio` replaces the
+/// source's audio with a WAV whose channel `n` carries DAMF ID `n` (DAMF) or ADM track `n + 1`
+/// (ADM). `frame_rate` sets the frame rate of an ADM source, which carries none.
 pub fn convert(
-    manifest: &Path,
+    source: &Path,
     audio: Option<&Path>,
     targets: &[Target],
     policy: LossPolicy,
+    frame_rate: Option<FrameRate>,
 ) -> Result<ConvertReport> {
-    let reader = DamfReader::open(manifest, policy)?;
-    let source = match audio {
-        Some(path) => reader.wave_audio(path)?,
-        None => reader.audio()?,
+    let (spec, updates, conversion) = if is_wave(source)? {
+        let mut reader = AdmReader::open(source, policy)?;
+        if let Some(rate) = frame_rate {
+            reader = reader.with_frame_rate(rate);
+        }
+        let input = match audio {
+            Some(path) => reader.wave_audio(path)?,
+            None => reader.audio()?,
+        };
+        let conversion = reader.convert(input, targets)?;
+        (
+            reader.spec().clone(),
+            reader.updates().len() as u64,
+            conversion,
+        )
+    } else {
+        if frame_rate.is_some() {
+            return Err(Error::msg(
+                "--fps applies to ADM input; DAMF carries its own frame rate",
+            ));
+        }
+        let reader = DamfReader::open(source, policy)?;
+        let input = match audio {
+            Some(path) => reader.wave_audio(path)?,
+            None => reader.audio()?,
+        };
+        let conversion = reader.convert(input, targets)?;
+        (reader.spec().clone(), reader.update_count(), conversion)
     };
-    let conversion = reader.convert(source, targets)?;
     Ok(ConvertReport {
-        source: manifest.to_owned(),
-        source_profile: profile_name(reader.spec().profile),
+        source: source.to_owned(),
+        source_profile: profile_name(spec.profile),
         audio: audio.map(Path::to_owned),
-        objects: reader.spec().objects.len(),
-        updates: reader.update_count(),
+        objects: spec.objects.len(),
+        updates,
         read_losses: losses(&conversion.read),
         outputs: targets
             .iter()

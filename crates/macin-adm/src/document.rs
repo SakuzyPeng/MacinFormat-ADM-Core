@@ -267,6 +267,35 @@ impl Document {
         }
         Ok(())
     }
+    /// Read-only element access by the `node` numbers a [`Snapshot`](crate::Snapshot) records,
+    /// for callers that need an element or literal value the projection does not carry. A number
+    /// that names no element gives `None` (or no children) rather than panicking.
+    pub fn element_name(&self, node: u32) -> Option<&str> {
+        self.checked(node).map(|n| n.local.as_str())
+    }
+    /// The value of attribute `name` on element `node`.
+    pub fn element_attribute(&self, node: u32, name: &str) -> Option<&str> {
+        self.checked(node).and_then(|n| n.attr(name))
+    }
+    /// The text content of element `node`, as written in the document.
+    pub fn element_text(&self, node: u32) -> Option<&str> {
+        self.checked(node).map(|n| n.text.as_str())
+    }
+    /// The child elements of `node` in its own namespace, in document order.
+    pub fn element_children(&self, node: u32) -> Vec<u32> {
+        if self.checked(node).is_none() {
+            return Vec::new();
+        }
+        self.all_children(node)
+    }
+    /// The element that carries ADM ID `id` (for example `AP_00011001`), in the document or the
+    /// common definitions.
+    pub fn element_by_id(&self, id: &str) -> Option<u32> {
+        self.ids.get(&canonical_id(id)).copied()
+    }
+    fn checked(&self, key: u32) -> Option<&Node> {
+        self.tree(key).nodes.get((key & !COMMON) as usize)
+    }
     pub(crate) fn tree(&self, key: u32) -> &Tree {
         if key & COMMON == 0 {
             &self.xml
