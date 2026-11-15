@@ -202,6 +202,8 @@ impl MasterWriter {
                 &mut diagnostics,
             )?;
         }
+        // DAMF has no programme name. The name is descriptive, not rendering semantics, so a DAMF
+        // master drops it without reporting a loss, deliberately.
         if spec.profile.is_adm() {
             for (field, lost) in [
                 ("screen_size_ratio", spec.screen_size_ratio != 1.),

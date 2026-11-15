@@ -344,7 +344,8 @@ film/master.atmos (home): 2 objects, 3 updates
   HOA 等其他 `typeDefinition`、block 之间有空隙或重叠，以及没有 `axml` / `chna` 的文件。
 - **帧率**：ADM 不带帧率，Logic 的 DBMD 帧率也不读回；输出默认 24 fps，用 `with_frame_rate`（或 `mfadm convert --fps`）指定。
   DBMD 的创建者字段同样不读回，输出写本库自己的值。
-- **DAMF 装不下的**：DAMF 没有节目名字段，ADM 转 DAMF 再转回时节目名回到默认值；`screenRef` 写 DAMF 时按损失处理。
+- **DAMF 装不下的**：DAMF 没有节目名字段。节目名只是描述信息，写 DAMF 时直接省略、不按损失处理，
+  所以 ADM 转 DAMF 再转回时节目名回到默认值。`screenRef` 写 DAMF 时则按损失处理。
   反过来，DAMF 里延伸到音频结尾之后的 ramp 在 ADM 中被截在结尾，读回是截短的 ramp 与当时的插值位置。
 - **内存**：AXML 由 `macin-adm` 整体解析，内存随元数据规模增长。实测 57.8 MB 的 AXML（118 个对象、11.8 万个事件）
   峰值约 640 MiB；DAMF 读取则是流式的。
@@ -358,7 +359,7 @@ film/master.atmos (home): 2 objects, 3 updates
 - Logic DBMD 只写已验证的静态兼容字段，不宣称能保存动态耳机事件。
 - 已验证的 DAMF 耳机值为 undefined / off / near / far；Mid 被显式拒绝或降为 undefined。
 - ADM importance 量化为 0..10，非整十的分值会报告损失。
-- 音频 24-bit 量化和所选时钟精度属于已声明的格式行为，不算损失。
+- 音频 24-bit 量化和所选时钟精度属于已声明的格式行为，不算损失。DAMF 不写节目名，同样不算损失。
 
 ## 不做什么
 

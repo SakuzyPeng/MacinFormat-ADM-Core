@@ -383,8 +383,9 @@ library writes, and the same shape from other tools.
 - **Frame rate**: ADM carries none, and a Logic source's DBMD frame rate is not read back; outputs default to
   24 fps, set with `with_frame_rate` (or `mfadm convert --fps`). DBMD's creator fields are not read back either;
   outputs carry this library's own.
-- **What DAMF does not hold**: DAMF has no programme name, so ADM through DAMF and back returns the default
-  name; `screenRef` is a loss when writing DAMF. The other way, a DAMF ramp that runs past the end of the audio
+- **What DAMF does not hold**: DAMF has no programme name. The name is descriptive, so writing DAMF leaves it
+  out without reporting a loss, and ADM through DAMF and back returns the default name. `screenRef`, by
+  contrast, is a loss when writing DAMF. The other way, a DAMF ramp that runs past the end of the audio
   is cut at the end in ADM and reads back as the shortened ramp to the value reached there.
 - **Memory**: `macin-adm` parses the AXML whole, so memory grows with the metadata. A 57.8 MB AXML (118
   objects, 118,000 events) peaked at about 640 MiB; DAMF reading streams.
@@ -401,7 +402,8 @@ applies explicit degradations, each recorded as a `MappingDiagnostic`.
 - The verified DAMF headphone values are undefined / off / near / far; Mid is either rejected explicitly or
   degraded to undefined.
 - ADM importance is quantised to 0..10, and scores that are not a multiple of ten report a loss.
-- 24-bit audio quantisation and the precision of the chosen clock are declared format behaviour, not loss.
+- 24-bit audio quantisation and the precision of the chosen clock are declared format behaviour, not loss;
+  neither is DAMF leaving out the programme name.
 
 ## Out of scope
 
