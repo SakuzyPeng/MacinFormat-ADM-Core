@@ -19,7 +19,15 @@
 - 手写的第三方写法：注释、flow/block 混用、引号风格、键顺序、bed ID 打乱、对象 ID 不连续、事件按时间交错、`sampleRate` 在 `events` 之后、`-.inf` 增益、`size3D`、缺省的 `rampLength`；按声道标记值核对了输出的声道顺序。
 - WAV 代替音频：24-bit WAV 与原 CAF 转换结果逐字节一致；声道不足时报错并指明缺失的 DAMF ID。
 - 规模：118 个对象、70.8 万个事件、60 秒 48 kHz 的 DAMF，一次转成 Standard、Logic、3dof 三份（约 1.1–1.4 GB 一份），release 构建 23 秒，峰值内存 12 MiB。
-- 尚未进行：用 Dolby Conversion Tool 产出的 DAMF 作为第三方输入做读回验证。上面的第三方写法是手写的，不能替代真实工具的输出。
+- 真实工具读回（2026-11-15，macOS arm64）：Conversion Tool 2.1.2_07765940 把 48 kHz Logic 与 home 转成 DAMF，
+  `mfadm convert` 读回并写成 Standard，均保持 12 声道、96,000 帧、2 个对象与逐字节相同的 PCM，分别读到 1 条和 3 条更新。
+  home 的耳机事件省略 `ID`，读取器已支持沿用前一个事件的 ID，覆盖初始状态折叠与更新迭代两遍扫描。
+  Logic 来源的读取损失为 `unknown_field`，写出损失为 `depth_factor`。home 来源读取无损失，写出损失为
+  `binaural_mode`、`depth_factor` 和 `head_tracking`，符合 Standard 的能力范围。
+- 同次独立互操作矩阵的 8 项检查全部通过，使用 EBU EAR 2.1.0 与 atmos_info 校验对应配置。
+  Conversion Tool 拒绝 96 kHz Logic/home 转 96 kHz DAMF，脚本识别其明确的采样率限制并记录跳过原因，保留 WAV 验收结果。
+  未知转换错误与 DAMF 读回失败仍使验收失败，另有 2 项 Python 回归覆盖这两类情况。
+- 本次修正的 workspace 格式与 Clippy 检查通过，114 项 Rust 测试通过，1 项历史 4 GiB 测试保持 ignored。
 
 ## ADM 读取与转换
 

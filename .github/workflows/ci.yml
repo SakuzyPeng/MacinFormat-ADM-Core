@@ -41,6 +41,9 @@ jobs:
       - name: Test workspace
         run: cargo test --locked --workspace
 
+      - name: Test interop checker
+        run: python -B -m unittest discover -s scripts -p "test_*.py"
+
       # The workspace build unifies macin-atmos/read on through macin-format, so the writer-only
       # configuration downstream crates depend on is checked on its own.
       - name: Lint macin-atmos without read

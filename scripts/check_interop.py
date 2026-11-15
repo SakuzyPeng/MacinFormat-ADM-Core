@@ -3,6 +3,9 @@
 
 No proprietary tools or media are copied into the repository. Conversion uses the input sample
 rate explicitly, so a 96 kHz acceptance check cannot silently pass by resampling to 48 kHz.
+
+With --damf-format, every master the Conversion Tool accepts is also converted to DAMF by the tool
+and read back by `mfadm convert`: a DAMF this library did not write is the reader's real input.
 """
 import argparse
 import hashlib
@@ -40,6 +43,63 @@ def wave(path):
     return channels, rate, chunks[b'data']
 
 
+def find_manifest(directory):
+    """The one DAMF manifest the tool wrote, whether it took --output_path as a file or a folder."""
+    manifests = sorted(p for p in directory.rglob('*.atmos') if p.is_file())
+    return manifests[0] if len(manifests) == 1 else None
+
+
+def damf_readback(args, mfadm, scratch, name, source, rate, pcm, objects):
+    """Convert `source` to DAMF with the Conversion Tool, then read that DAMF back with mfadm.
+
+    Acceptance needs the tool's DAMF to read at all, and the ADM written from it to carry the
+    source PCM byte for byte at the source rate, length and object count. What reading dropped is
+    recorded for review: a DAMF from another tool may carry fields this library has no model for.
+    """
+    folder = scratch / (name + '-tool-damf')
+    folder.mkdir()
+    result = run([args.conversion_tool, '--pm_in', source,
+                  '--output_path', folder / (name + '.atmos'), '--output_format', args.damf_format,
+                  '--target_sample_rate', rate])
+    # Only a recognized tool limitation skips readback; other early returns fail acceptance.
+    item = {'conversion_exit': result.returncode, 'accepted': False}
+    if result.returncode:
+        error = (result.stdout + result.stderr).replace(str(scratch), '<temp>')
+        item['conversion_error'] = error[-1600:]
+        unsupported_rate_errors = (
+            'ERROR: Sample rate conversion from 96kHz .wav to 96kHz.atmos is not supported.',
+            'ERROR: Sample rate conversion from 96kHz .atmos to 96kHz.atmos is not supported.',
+        )
+        if rate == 96000 and any(line in unsupported_rate_errors for line in error.splitlines()):
+            del item['accepted']
+            item['skipped'] = 'Conversion Tool does not support 96 kHz DAMF output'
+        return item
+    manifest = find_manifest(folder)
+    if manifest is None:
+        item['error'] = 'expected exactly one .atmos manifest in the tool output'
+        return item
+    item['members'] = sorted(p.name for p in manifest.parent.iterdir())
+    readback = scratch / (name + '-readback.wav')
+    read = run([mfadm, 'convert', manifest, '--to', 'standard={}'.format(readback),
+                '--allow-loss', '--json'])
+    item['mfadm_exit'] = read.returncode
+    if read.returncode:
+        item['mfadm_error'] = (read.stdout + read.stderr).replace(str(scratch), '<temp>')[-1600:]
+        return item
+    converted = json.loads(read.stdout)
+    channels, actual_rate, actual_pcm = wave(readback)
+    item.update(source_profile=converted['source_profile'], objects=converted['objects'],
+                updates=converted['updates'],
+                read_losses=sorted({loss['field'] for loss in converted['read_losses']}),
+                write_losses=sorted({loss['field'] for output in converted['outputs']
+                                     for loss in output['losses']}),
+                channels=channels, sample_rate=actual_rate,
+                frames=len(actual_pcm) // (channels * 3), pcm_identical=actual_pcm == pcm)
+    item['accepted'] = bool(item['pcm_identical'] and actual_rate == rate
+                            and item['frames'] == rate * 2 and item['objects'] == objects)
+    return item
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--conversion-tool', required=True, type=Path)
@@ -47,6 +107,10 @@ def main():
     parser.add_argument('--mradm', type=Path)
     parser.add_argument('--generator', type=Path)
     parser.add_argument('--ear', action='store_true', help='Validate ADM with EBU EAR in the current Python environment')
+    parser.add_argument('--damf-format',
+                        help="The Conversion Tool's --output_format value for DAMF (see its --help); "
+                             'enables reading the tool\'s DAMF back with mfadm')
+    parser.add_argument('--mfadm', type=Path, help='A prebuilt mfadm; built from this checkout otherwise')
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -60,6 +124,18 @@ def main():
         generator = Path(metadata['target_directory']) / 'release/examples/synthetic_master'
         if not generator.exists():
             generator = generator.with_suffix('.exe')
+    mfadm = None
+    if args.damf_format:
+        if args.mfadm:
+            mfadm = args.mfadm.resolve(strict=True)
+        else:
+            subprocess.run(['cargo', 'build', '--locked', '--release', '-p', 'macin-format'],
+                           cwd=root, check=True)
+            metadata = json.loads(subprocess.check_output(
+                ['cargo', 'metadata', '--locked', '--format-version', '1', '--no-deps'], cwd=root))
+            mfadm = Path(metadata['target_directory']) / 'release/mfadm'
+            if not mfadm.exists():
+                mfadm = mfadm.with_suffix('.exe')
     version = run([args.conversion_tool, '--version'])
     report = {'schema': 'macin-format.interop.v1',
               'conversion_tool_version': version.stdout.strip().replace(str(args.conversion_tool), args.conversion_tool.name),
@@ -67,6 +143,9 @@ def main():
     if args.ear:
         import importlib.metadata
         report['ear_version'] = importlib.metadata.version('ear')
+    if mfadm:
+        report['damf_format'] = args.damf_format
+        report['mfadm_sha256'] = hashlib.sha256(mfadm.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix='macin-format-interop-') as directory:
         scratch = Path(directory)
         for rate in (48000, 96000):
@@ -133,6 +212,11 @@ def main():
                         item['limitations'].append('atmos_info does not recognize BW64')
                     else:
                         item['unexpected_info_failure'] = True
+                if mfadm and result.returncode == 0:
+                    # synthetic_master writes two objects.
+                    item['damf_readback'] = damf_readback(args, mfadm, scratch, name, source, rate, pcm, 2)
+                elif mfadm:
+                    item['damf_readback'] = {'skipped': 'the Conversion Tool did not accept this input'}
                 # Each profile requires an independent validator which supports that format.
                 # Known tool rejections remain recorded; unknown failures are not skipped.
                 independent = (item.get('ear_exit') == 0 if profile == 'standard'
@@ -141,10 +225,12 @@ def main():
                 item['accepted'] = bool(independent and not item.get('unexpected_conversion_failure')
                                         and not item.get('unexpected_info_failure')
                                         and item.get('mradm_exit', 0) == 0
-                                        and item.get('ear_exit', 0) == 0)
+                                        and item.get('ear_exit', 0) == 0
+                                        and item.get('damf_readback', {}).get('accepted', True))
                 report['cases'].append(item)
                 print(name, 'accepted=', item['accepted'], 'conversion=', result.returncode,
-                      'PCM=', item.get('pcm_identical'), 'limitations=', len(item['limitations']), flush=True)
+                      'PCM=', item.get('pcm_identical'), 'limitations=', len(item['limitations']),
+                      'DAMF readback=', item.get('damf_readback', {}).get('accepted'), flush=True)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

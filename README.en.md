@@ -333,7 +333,8 @@ unchanged, and what the model cannot hold while reading follows the same `LossPo
   state; the second yields the remaining updates in file order. Converting 118 objects with 708,000 events to
   three outputs at once (about 1.1–1.4 GB each) peaked at 12 MiB.
 - **IDs and channels**: a DAMF ID is its audio channel index. The bed is reordered to L, R, C, LFE, Lss, Rss,
-  Lrs, Rrs, Lts, Rts and the objects follow in ascending ID order; the `TrackId` read back is the DAMF ID. A
+  Lrs, Rrs, Lts, Rts and the objects follow in ascending ID order; the `TrackId` read back is the DAMF ID.
+  An event with no `ID` inherits the preceding event's value. The first event must supply an `ID`. A
   DAMF without a bed is written with a silent bed.
 - **A WAV as the audio**: `wave_audio` uses a WAV in place of `.atmos.audio`, with channel n carrying DAMF ID
   n and a sample rate that must match the metadata. 16/24-bit PCM converts exactly; 32-bit PCM and float are
@@ -462,6 +463,25 @@ environment and the paths to the external tools:
 python scripts/check_interop.py --ear \
   --conversion-tool /path/to/cmdline_atmos_conversion_tool \
   --atmos-info /path/to/atmos_info \
+  --report artifacts/interop.json
+```
+
+**DAMF read-back**: with `--damf-format <name>`, every input the Conversion Tool accepts is also converted by
+the tool to DAMF, then read back with `mfadm convert` and written as Standard ADM. That DAMF was not written by
+this library, which makes it the reader's real input. `<name>` is the value your Conversion Tool version's
+`--output_format` takes for DAMF (see its `--help`); the script does not guess it. Read-back has to succeed,
+and the ADM written from it has to carry the source PCM byte for byte at the source sample rate, length and
+object count; the loss fields reported while reading and the update count are recorded for review, not
+judged. `mfadm` is built from this checkout unless `--mfadm` names one.
+Conversion Tool 2.1.2 cannot output 96 kHz DAMF. The script recognizes that specific error and records
+the skipped read-back while retaining the WAV acceptance result. Other conversion and read-back errors
+still fail the check.
+
+```sh
+python scripts/check_interop.py --ear \
+  --conversion-tool /path/to/cmdline_atmos_conversion_tool \
+  --atmos-info /path/to/atmos_info \
+  --damf-format <name> \
   --report artifacts/interop.json
 ```
 

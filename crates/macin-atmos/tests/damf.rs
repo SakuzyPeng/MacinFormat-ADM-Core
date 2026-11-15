@@ -498,6 +498,96 @@ fn third_party_yaml_layouts_and_channel_order_are_read() {
 }
 
 #[test]
+fn omitted_event_ids_inherit_across_both_metadata_passes() {
+    let dir = Temp::new();
+    let manifest = third_party(
+        &dir,
+        "sampleRate: 48000
+events:
+  - {ID: 13, samplePos: 0, pos: [-0.8, 0.5, 0]}
+  - {samplePos: 0, binauralRenderMode: near}
+  - {ID: 0, samplePos: 0, pos: [0.5, -0.5, 0]}
+  - {samplePos: 0, trimBypass: true}
+  - {ID: 7, samplePos: 0, gain: 0}
+  - {samplePos: 120, binauralRenderMode: off}
+  - {ID: 13, samplePos: 1200, pos: [0.8, 0.5, 0], rampLength: 2400}
+  - {samplePos: 1500, headTrackMode: head relative, binauralRenderMode: far}
+  - {samplePos: 1800, headTrackMode: scene relative, binauralRenderMode: near}
+  - {ID: 0, samplePos: 2400, pos: [1, 1, 0]}
+  - {samplePos: 3000, active: false}
+",
+    );
+    let reader = DamfReader::open(manifest, LossPolicy::Reject).unwrap();
+    assert!(reader.diagnostics().is_empty());
+    assert!(reader.spec().objects[0].initial.trim_bypass);
+    assert_eq!(
+        reader.spec().objects[1].initial.binaural_mode,
+        BinauralMode::Near
+    );
+    let expected = vec![
+        patch(
+            13,
+            1200,
+            Some(2400),
+            ObjectPatch {
+                position: Some([0.8, 0.5, 0.]),
+                ..Default::default()
+            },
+        ),
+        patch(
+            13,
+            1500,
+            None,
+            ObjectPatch {
+                head_tracking: Some(HeadTracking::HeadRelative),
+                binaural_mode: Some(BinauralMode::Far),
+                ..Default::default()
+            },
+        ),
+        patch(
+            13,
+            1800,
+            None,
+            ObjectPatch {
+                head_tracking: Some(HeadTracking::SceneRelative),
+                binaural_mode: Some(BinauralMode::Near),
+                ..Default::default()
+            },
+        ),
+        patch(
+            0,
+            2400,
+            Some(0),
+            ObjectPatch {
+                position: Some([1., 1., 0.]),
+                ..Default::default()
+            },
+        ),
+        patch(
+            0,
+            3000,
+            None,
+            ObjectPatch {
+                active: Some(false),
+                ..Default::default()
+            },
+        ),
+    ];
+    assert_eq!(reader.update_count(), expected.len() as u64);
+    for _ in 0..2 {
+        let updates: Vec<_> = reader.updates().unwrap().map(Result::unwrap).collect();
+        assert_eq!(updates, expected);
+    }
+    let conversion = reader
+        .convert(
+            reader.audio().unwrap(),
+            &targets(&dir, &[Profile::DamfHome]),
+        )
+        .unwrap();
+    assert_eq!(conversion.outputs[0].frames, 4800);
+}
+
+#[test]
 fn an_objects_only_master_gets_a_silent_bed() {
     let dir = Temp::new();
     fs::write(
@@ -576,6 +666,21 @@ fn malformed_or_unsupported_input_is_refused() {
     let base =
         "sampleRate: 48000\nevents:\n  - {ID: 0, samplePos: 0}\n  - {ID: 13, samplePos: 0}\n";
     for (metadata, kind, text) in [
+        (
+            "sampleRate: 48000\nevents:\n  - {samplePos: 0}\n".to_owned(),
+            ErrorKind::InvalidInput,
+            "missing ID",
+        ),
+        (
+            format!("{base}  - {{ID: 13, samplePos: 50}}\n  - {{samplePos: 40}}\n"),
+            ErrorKind::InvalidInput,
+            "backwards",
+        ),
+        (
+            format!("{base}  - {{ID: invalid, samplePos: 50}}\n"),
+            ErrorKind::InvalidInput,
+            "nonnegative integer",
+        ),
         (
             format!("{base}  - {{ID: 13, samplePos: 50}}\n  - {{ID: 13, samplePos: 40}}\n"),
             ErrorKind::InvalidInput,
