@@ -20,6 +20,8 @@
 - WAV 代替音频：24-bit WAV 与原 CAF 转换结果逐字节一致；声道不足时报错并指明缺失的 DAMF ID。
 - 规模：118 个对象、70.8 万个事件、60 秒 48 kHz 的 DAMF，一次转成 Standard、Logic、3dof 三份（约 1.1–1.4 GB 一份），release 构建 23 秒，峰值内存 12 MiB。
 - 尚未进行：用 Dolby Conversion Tool 产出的 DAMF 作为第三方输入做读回验证。上面的第三方写法是手写的，不能替代真实工具的输出。
+  `scripts/check_interop.py --damf-format <名称>` 已支持这项检查（2026-11-15）；目前只用模仿该工具命令行的替身脚本验证过流程：
+  读回成功时通过、DAMF 读不出时判为失败并记录错误、不传该参数时报告不变。真实工具的结果待在装有 Conversion Tool 的机器上运行。
 
 ## ADM 读取与转换
 

@@ -415,6 +415,19 @@ python scripts/check_interop.py --ear \
   --report artifacts/interop.json
 ```
 
+**DAMF 读回**：加上 `--damf-format <名称>` 后，对 Conversion Tool 接受的每个输入，再让它输出一份 DAMF，
+用 `mfadm convert` 读回并写成 Standard ADM。这份 DAMF 不是本库写的，正是读取器要面对的真实输入。
+`<名称>` 是你的 Conversion Tool 版本里 `--output_format` 表示 DAMF 的取值（见它的 `--help`），脚本不猜测这个值。
+读回要求能读出来，且写出的 ADM 与源文件 PCM 逐字节一致、采样率、帧数和对象数正确；读取时报告的损失字段与更新数
+记入报告供人工核对，不作为验收条件。`mfadm` 默认从本仓库构建，也可以用 `--mfadm` 指定。
+
+```sh
+python scripts/check_interop.py \
+  --conversion-tool /path/to/cmdline_atmos_conversion_tool \
+  --damf-format <名称> \
+  --report artifacts/interop.json
+```
+
 工具版本、逐项结果和消费方迁移的逐字节对比见 [验证记录](docs/VALIDATION.md)。
 
 ## 文档
