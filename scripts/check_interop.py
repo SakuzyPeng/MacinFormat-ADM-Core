@@ -61,10 +61,18 @@ def damf_readback(args, mfadm, scratch, name, source, rate, pcm, objects):
     result = run([args.conversion_tool, '--pm_in', source,
                   '--output_path', folder / (name + '.atmos'), '--output_format', args.damf_format,
                   '--target_sample_rate', rate])
-    # Every early return is a failure; only a skipped case (no readback attempted) lacks the key.
+    # Only a recognized tool limitation skips readback; other early returns fail acceptance.
     item = {'conversion_exit': result.returncode, 'accepted': False}
     if result.returncode:
-        item['conversion_error'] = (result.stdout + result.stderr).replace(str(scratch), '<temp>')[-1600:]
+        error = (result.stdout + result.stderr).replace(str(scratch), '<temp>')
+        item['conversion_error'] = error[-1600:]
+        unsupported_rate_errors = (
+            'ERROR: Sample rate conversion from 96kHz .wav to 96kHz.atmos is not supported.',
+            'ERROR: Sample rate conversion from 96kHz .atmos to 96kHz.atmos is not supported.',
+        )
+        if rate == 96000 and any(line in unsupported_rate_errors for line in error.splitlines()):
+            del item['accepted']
+            item['skipped'] = 'Conversion Tool does not support 96 kHz DAMF output'
         return item
     manifest = find_manifest(folder)
     if manifest is None:

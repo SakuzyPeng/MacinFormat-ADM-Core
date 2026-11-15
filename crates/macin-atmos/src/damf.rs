@@ -112,6 +112,7 @@ type Differs = fn(&Node) -> Result<bool>;
 
 /// One parsed `.atmos.metadata` event.
 struct RawEvent {
+    line: usize,
     id: u32,
     sample: u64,
     patch: ObjectPatch,
@@ -153,7 +154,7 @@ fn classification(node: &Node, what: &str) -> Result<i8> {
 }
 
 impl RawEvent {
-    fn parse(node: &Node) -> Result<Self> {
+    fn parse(node: &Node, previous_id: Option<u32>) -> Result<Self> {
         let entries = node.as_mapping("event")?;
         let line = node.line();
         let mut patch = ObjectPatch::default();
@@ -234,7 +235,11 @@ impl RawEvent {
             }
         }
         Ok(Self {
-            id: id(require(entries, "ID", line)?, "ID")?,
+            line,
+            id: match get(entries, "ID") {
+                Some(value) => id(value, "ID")?,
+                None => previous_id.ok_or_else(|| yaml::invalid(line, "missing ID"))?,
+            },
             sample: require(entries, "samplePos", line)?.as_u64("samplePos")?,
             ramp: get(entries, "rampLength")
                 .map(|n| n.as_u64("rampLength"))
@@ -308,6 +313,7 @@ struct MetadataScan<R: std::io::BufRead + 'static> {
     state: ScanState,
     keys: BTreeSet<String>,
     sample_rate: Option<u64>,
+    previous_id: Option<u32>,
     unknown: Vec<String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -324,6 +330,7 @@ fn open_metadata(path: &Path) -> Result<MetadataScan<BufReader<File>>> {
         state: ScanState::Keys,
         keys: BTreeSet::new(),
         sample_rate: None,
+        previous_id: None,
         unknown: Vec::new(),
     };
     scan.start().map_err(|e| located(path, e))?;
@@ -341,11 +348,11 @@ impl<R: std::io::BufRead + 'static> MetadataScan<R> {
         }
         Ok(())
     }
-    /// The next event node, or `None` once the document is finished.
-    fn next_event(&mut self) -> Result<Option<Node>> {
+    /// The next event, resolving an omitted ID from the preceding event in either pass.
+    fn next_event(&mut self) -> Result<Option<RawEvent>> {
         self.step().map_err(|e| located(&self.path, e))
     }
-    fn step(&mut self) -> Result<Option<Node>> {
+    fn step(&mut self) -> Result<Option<RawEvent>> {
         loop {
             match self.state {
                 ScanState::Done => return Ok(None),
@@ -355,7 +362,10 @@ impl<R: std::io::BufRead + 'static> MetadataScan<R> {
                         self.state = ScanState::Keys;
                         continue;
                     }
-                    return self.stream.node(event, span, 1).map(Some);
+                    let node = self.stream.node(event, span, 1)?;
+                    let event = RawEvent::parse(&node, self.previous_id)?;
+                    self.previous_id = Some(event.id);
+                    return Ok(Some(event));
                 }
                 ScanState::Keys => {
                     let Some((key, line)) = self.stream.key()? else {
@@ -743,8 +753,7 @@ impl DamfReader {
                 located(&path, e)
             }
         };
-        while let Some(node) = scan.next_event()? {
-            let event = RawEvent::parse(&node).map_err(at)?;
+        while let Some(event) = scan.next_event()? {
             let track = TrackId(u64::from(event.id));
             for key in &event.unknown {
                 losses.report(
@@ -759,7 +768,7 @@ impl DamfReader {
                 let last = bed_last.entry(event.id).or_default();
                 if event.sample < *last {
                     return Err(at(yaml::invalid(
-                        node.line(),
+                        event.line,
                         format!("events for ID {} go backwards", event.id),
                     )));
                 }
@@ -773,7 +782,7 @@ impl DamfReader {
             }
             let pass = passes.get_mut(&event.id).ok_or_else(|| {
                 at(yaml::invalid(
-                    node.line(),
+                    event.line,
                     format!(
                         "event for ID {} which the manifest does not declare",
                         event.id
@@ -782,7 +791,7 @@ impl DamfReader {
             })?;
             if event.sample < pass.last {
                 return Err(at(yaml::invalid(
-                    node.line(),
+                    event.line,
                     format!("events for ID {} go backwards", event.id),
                 )));
             }
@@ -982,14 +991,10 @@ impl Iterator for Updates {
     type Item = Result<ObjectUpdate>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let node = match self.scan.next_event() {
-                Ok(Some(node)) => node,
+            let event = match self.scan.next_event() {
+                Ok(Some(event)) => event,
                 Ok(None) => return None,
                 Err(e) => return Some(Err(e)),
-            };
-            let event = match RawEvent::parse(&node) {
-                Ok(event) => event,
-                Err(e) => return Some(Err(located(&self.scan.path, e))),
             };
             if self.beds.contains(&event.id) {
                 continue;

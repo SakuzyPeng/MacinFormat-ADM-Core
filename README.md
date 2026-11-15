@@ -307,7 +307,8 @@ film/master.atmos (home): 2 objects, 3 updates
   不带 ramp 的事件折叠成初始状态；第二遍按文件顺序给出其余更新。实测 118 个对象、70.8 万个事件、一次写出三份
   （约 1.1–1.4 GB 一份）时峰值内存 12 MiB。
 - **ID 与声道**：DAMF 的 ID 就是音频声道号。bed 按 L、R、C、LFE、Lss、Rss、Lrs、Rrs、Lts、Rts 重新排列，
-  对象按 ID 升序排在后面，读回的 `TrackId` 等于 DAMF ID。没有 bed 的 DAMF 会写出一组静音 bed。
+  对象按 ID 升序排在后面，读回的 `TrackId` 等于 DAMF ID。事件省略 `ID` 时沿用前一个事件的值，首个事件必须提供 `ID`。
+  没有 bed 的 DAMF 会写出一组静音 bed。
 - **WAV 作音频**：`wave_audio` 用 WAV 代替 `.atmos.audio`，第 n 个声道对应 DAMF ID n，采样率必须与元数据一致。
   16/24-bit PCM 精确转换；32-bit PCM 和浮点按已声明的格式行为量化到 24 bit，超出 ±1 的浮点样本报错。
 - **按损失处理**（`Reject` 报错并指明字段，`Allow` 丢弃并记入诊断）：bed 声道上固定 bed 无法再现的值（`bed_*`）、
@@ -420,10 +421,13 @@ python scripts/check_interop.py --ear \
 `<名称>` 是你的 Conversion Tool 版本里 `--output_format` 表示 DAMF 的取值（见它的 `--help`），脚本不猜测这个值。
 读回要求能读出来，且写出的 ADM 与源文件 PCM 逐字节一致、采样率、帧数和对象数正确；读取时报告的损失字段与更新数
 记入报告供人工核对，不作为验收条件。`mfadm` 默认从本仓库构建，也可以用 `--mfadm` 指定。
+Conversion Tool 2.1.2 不支持输出 96 kHz DAMF，脚本识别这一明确错误后记录跳过原因，保留原有的 WAV 验收结果。
+其他转换错误与读回错误仍使检查失败。
 
 ```sh
-python scripts/check_interop.py \
+python scripts/check_interop.py --ear \
   --conversion-tool /path/to/cmdline_atmos_conversion_tool \
+  --atmos-info /path/to/atmos_info \
   --damf-format <名称> \
   --report artifacts/interop.json
 ```
