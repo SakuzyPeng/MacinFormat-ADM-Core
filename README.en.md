@@ -61,7 +61,7 @@ handled, and what reading treats as loss or refuses outright, is in the
 | `macin-adm` | `Document`, `Snapshot`, `Patch`, `generate` | ADM XML, reference resolution, Objects/DirectSpeakers/HOA projection, generation and source-preserving write-back; read-only access to the literal elements by `Snapshot` node number |
 | `macin-bwf` | `Reader`, `ChunkReader`, `Writer`, `Chna` | RIFF/RF64/BW64, PCM and container edits; does not interpret ADM XML |
 | `macin-atmos` | `MasterSpec`, `MasterWriter`, `MultiWriter`; `damf::DamfReader`, `adm::AdmReader` (feature `read`) | Source-agnostic ADM BWF / DAMF master writing, and DAMF / ADM reading and conversion; builds on the other two |
-| `macin-format` (unpublished) | the `mfadm` command | The command-line shell for inspection and conversion |
+| `macin-format` (CLI) | the `mfadm` command | The command-line shell for inspection and conversion |
 
 All four forbid unsafe code; the three libraries depend only on `quick-xml`, `libm` and `renamore`, pinned.
 The readers sit behind the `read` feature, off by default, so consumers that only write keep their dependency
@@ -69,24 +69,30 @@ graph. See [dependencies and features](docs/REFERENCE.en.md#dependencies-and-fea
 
 ## Getting it
 
-The source is distributed through the public GitHub repository; pin a commit with a Git dependency:
+The three libraries are distributed through crates.io and require Rust 1.98 or newer. Add the dependencies you need.
 
 ```toml
 [dependencies]
-macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+macin-atmos = "=0.1.0"
 # Pull in only what you need when you just read or write ADM or containers:
-macin-adm = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
-macin-bwf = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+macin-adm = "=0.1.0"
+macin-bwf = "=0.1.0"
 ```
 
-Turn on `read` to read DAMF or ADM masters, or to convert them:
+Enable `read` to read DAMF or ADM masters, or to convert them.
 
 ```toml
-macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>", features = ["read"] }
+macin-atmos = { version = "=0.1.0", features = ["read"] }
 ```
 
-The three libraries carry `0.1.0` package metadata but **have not been uploaded to crates.io yet**; the upload
-steps are in [crates.io release preparation](docs/CRATES_IO_RELEASE.md) (Chinese).
+A Git dependency can also pin the source to a specific commit.
+
+```toml
+macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+```
+
+`mfadm` provides archives for Apple silicon macOS, Windows x64 and Linux x64. Extract the archive and run it in a terminal.
+[v0.1.0 release](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/releases/tag/v0.1.0)
 
 ## Quickstart
 

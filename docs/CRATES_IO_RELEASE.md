@@ -1,6 +1,6 @@
 # crates.io 发布准备
 
-当前准备 `0.1.0` 的包元数据与归档，尚未上传 crates.io。公开 GitHub 源码可作为固定提交的 Git 依赖使用。
+本页说明三个 Rust 库的 crates.io 发布步骤。版本由根 `Cargo.toml` 的 `workspace.package.version` 统一维护。
 
 `macin-format`（`mfadm` 命令）设为 `publish = false`，`cargo publish --workspace` 会跳过它。
 `macin-atmos` 的 `read` feature 默认关闭，`saphyr-parser` 只作为可选依赖进入其清单；发布前还要单独执行
@@ -11,6 +11,7 @@ CLI 下载包、三平台构建与 GitHub 发布草稿见 [mfadm 下载包与 Gi
 
 三个 crate 继承 workspace 版本、MSRV、MIT 与仓库地址，归档包含 README 和许可证。
 `macin-adm` 同时携带 common definitions 的 Apache-2.0 LICENSE、NOTICE 与来源清单。
+`macin-atmos` 的 docs.rs 构建启用全部 feature，展示读取与转换 API。
 
 发布前在干净工作树执行以下检查。
 

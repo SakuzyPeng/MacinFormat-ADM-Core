@@ -51,31 +51,37 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 和 ADM BWF 读回同�
 | `macin-adm` | `Document`、`Snapshot`、`Patch`、`generate` | ADM XML、引用解析、Objects/DirectSpeakers/HOA 投影、生成与保留原文的回写；按 `Snapshot` 节点号只读访问原始元素 |
 | `macin-bwf` | `Reader`、`ChunkReader`、`Writer`、`Chna` | RIFF/RF64/BW64、PCM 与容器编辑；不解释 ADM XML |
 | `macin-atmos` | `MasterSpec`、`MasterWriter`、`MultiWriter`；`damf::DamfReader`、`adm::AdmReader`（`read` feature） | 来源无关的 ADM BWF / DAMF 母版写入，以及 DAMF / ADM 读取与转换；依赖前两者 |
-| `macin-format`（不发布） | 命令行工具 `mfadm` | 检查与转换的命令行外壳 |
+| `macin-format`（CLI） | 命令行工具 `mfadm` | 检查与转换的命令行外壳 |
 
 全部禁止 unsafe；三个库只依赖 `quick-xml`、`libm` 和 `renamore`，版本锁定。读取器在默认关闭的 `read` feature 后面，
 只写母版的消费方依赖图不变。详见[依赖与 feature](docs/REFERENCE.md#依赖与-feature)。
 
 ## 获取
 
-源码通过公开 GitHub 仓库分发，用 Git 依赖固定到某个提交即可：
+三个库通过 crates.io 分发，要求 Rust 1.98 或更新版本。按需添加依赖。
 
 ```toml
 [dependencies]
-macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+macin-atmos = "=0.1.0"
 # 只需要读写 ADM 或容器时，按需引入：
-macin-adm = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
-macin-bwf = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+macin-adm = "=0.1.0"
+macin-bwf = "=0.1.0"
 ```
 
-需要读 DAMF / ADM 或做转换时打开 `read`：
+读取 DAMF / ADM 母版或做转换时启用 `read`。
 
 ```toml
-macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>", features = ["read"] }
+macin-atmos = { version = "=0.1.0", features = ["read"] }
 ```
 
-三个库已准备 `0.1.0` 的包元数据，**尚未上传 crates.io**；上传步骤见
-[crates.io 发布准备](docs/CRATES_IO_RELEASE.md)。
+源码也可通过 Git 依赖固定到具体提交。
+
+```toml
+macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev = "<commit>" }
+```
+
+`mfadm` 提供 macOS Apple 芯片、Windows x64 和 Linux x64 下载包，解压后在终端运行。
+[v0.1.0 发布页](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/releases/tag/v0.1.0)
 
 ## 快速上手
 
