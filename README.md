@@ -448,6 +448,10 @@ ADM 经 DAMF 再转回 ADM 逐字节一致，并覆盖只靠 CHNA 定义轨道�
 | DAMF home | Conversion Tool、atmos_info | — |
 | DAMF 3DoF | 较新的 atmos_info | Conversion Tool 2.1.2 的 DAMF 版本上限为 0.5 |
 
+2026-11-15，用户实测确认本次 48 kHz / 24-bit、2 秒的 Logic RF64 和 DAMF home 母版兼容 Logic Pro 与
+Dolby Atmos Renderer。Logic 样本采用 `dbmd_originator = "Created using Dolby equipment"`。
+样本参数与工具检查详见[实机兼容验证](docs/VALIDATION.md#logic-pro-与-dolby-atmos-renderer-实机兼容验证)。
+
 这些边界在检查器里作为明确的工具限制记录，不把拒绝写成通过；未知失败仍使检查失败。
 完整矩阵需要在同一 Python 环境里安装 EBU EAR，并提供外部工具路径：
 

@@ -57,7 +57,7 @@ Dolby Atmos Conversion Tool 2.1.2_07765940、DME 随附 atmos_info、EBU EAR 2.1
 | 配置 | 48/96 kHz 的实际结果 | 工具限制 |
 | --- | --- | --- |
 | Standard BW64 | EAR 图/CHNA 校验与 mradm 导入通过 | 本机两款 Dolby 读取器要求 RIFF/RF64，不识别 BW64 |
-| Logic RF64 | Conversion Tool 转换、EAR 校验、mradm 导入通过；转换后采样率/帧数保持，PCM 逐字节一致 | atmos_info 的严格校验拒绝非 Dolby 创建工具标记；保留真实创建者，不伪造来源 |
+| Logic RF64 | Conversion Tool 转换、EAR 校验、mradm 导入通过；转换后采样率/帧数保持，PCM 逐字节一致 | 默认 DBMD 创建来源会触发 atmos_info 来源检查。兼容来源值及应用实测结果见下文 |
 | DAMF home | Conversion Tool 与 atmos_info 通过；转换后采样率/帧数保持，PCM 逐字节一致 | 无本次用例限制 |
 | DAMF 3DoF | atmos_info 验证通过 | 本机 Conversion Tool 最高支持 DAMF 0.5，拒绝 0.6.0 |
 
@@ -77,6 +77,23 @@ Standard 必须通过独立 EAR 验证，3DoF 必须通过 atmos_info，Logic/ho
   显式设置 `dbmd_originator = "Created using Dolby equipment"` 的 8 组均无 WARN/ERROR 日志。
   默认值与仅修改产品名的 8 组仍报告创建来源提示，退出码为 0。全部 16 组转换后的 PCM 均逐字节一致。
 - workspace 格式与 Clippy 检查通过，117 项 Rust 测试与 2 项 Python 回归通过，1 项历史 4 GiB 测试保持 ignored。
+
+## Logic Pro 与 Dolby Atmos Renderer 实机兼容验证
+
+日期为 2026-11-15，生成环境为 macOS arm64，生成代码提交为 `73fc2c7`。
+用户实测确认本次生成的母版兼容 Logic Pro 与 Dolby Atmos Renderer。
+
+- 样本为同源合成测试信号，时长 2 秒、48 kHz、24-bit PCM、24 fps，包含一个 7.1.2 bed 和两个对象，
+  其中一个对象带位置移动。输出为 `logic_48k24.wav`（Logic RF64 ADM BWF）与 DAMF Home 0.5.1 三件套
+  `master.atmos`、`master.atmos.audio`、`master.atmos.metadata`。
+- Logic 样本采用 `dbmd_originator = "Created using Dolby equipment"`，产品字段为 `MacinFormat ADM Core`。
+- 两份均通过 DME 随附 `atmos_info --validate 1` 校验，Conversion Tool 2.1.2_07765940 转 WAV 成功，
+  转换日志无 WARN/ERROR。转换前后均保持 12 声道、48 kHz、96,000 帧，PCM 逐字节一致。
+- 两份原始输出的 PCM 同样逐字节一致，SHA-256 为
+  `27a671d741556b728469479cc0a866bee5f12fb455780f0311735fc71d2bc1cb`。
+  DAMF 经 `mfadm convert` 转回相同 DBMD 设置的 Logic 母版后，整个 WAV 与原样本逐字节一致，读写均无语义损失。
+
+应用兼容结论对应上述样本与参数。
 
 ## 消费方迁移
 
