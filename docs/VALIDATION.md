@@ -1,8 +1,59 @@
 # 验证记录
 
-日期：2026-11-14。生成媒体均为确定性合成信号，产物不进入 Git。
+前两节说明怎么验证：自动测试覆盖什么、外部工具检查器怎么跑。其后是按日期记录的实测结果。
+生成媒体均为确定性合成信号，产物不进入 Git。
+
+## 测试覆盖
+
+`cargo test --locked --workspace` 只用仓库内独立的 XML/WAVE 夹具，不需要媒体或外部工具。
+
+- **写入**：分块一致性、ramp、四种配置与两种采样率、原子失败，以及不创建巨型文件的虚拟 4 GiB 边界检查。
+  1 项实际写入超过 4 GiB 的历史测试保持 ignored。
+- **DAMF 读取**：DAMF 转 DAMF 三个成员逐字节复原、DAMF 转 ADM 与直接写 ADM 逐字节一致；覆盖手写的第三方 YAML 写法、
+  声道重排、WAV 代替音频、各类损失与拒绝。
+- **ADM 读取**：ADM 转同一配置逐字节复原、ADM 经 DAMF 再转回 ADM 逐字节一致；覆盖只靠 CHNA 定义轨道的第三方写法、
+  对象起止时间、整块插值、dB 与对象级增益、声道重排、各类损失与拒绝，以及预读过或来自其他读取器的音频；
+  另覆盖乱序 block、继承的命名空间、后续 block 校验和源文件被截断时的错误。
+- **不开 `read` 的 `macin-atmos`**：workspace 构建会经由 `macin-format` 打开 `read`，所以只写母版的配置单独跑
+  `cargo clippy --locked -p macin-atmos --all-targets -- -D warnings` 与 `cargo test --locked -p macin-atmos`。
+
+原生验证平台为 macOS arm64 与 Windows x64，CI（`.github/workflows/ci.yml`）在这两个平台上跑同一套检查，
+另含互操作检查器自身的 Python 回归（`python -B -m unittest discover -s scripts -p "test_*.py"`）。
+
+## 互操作检查器用法
+
+`scripts/check_interop.py` 用调用方提供的外部工具（以及可选的 mradm 读取器）验证合成输出。
+同源读回只作为集成验证，不能替代独立的格式验收。已识别的工具限制在检查器里作为明确限制记录，
+不把拒绝写成通过；未知失败仍使检查失败。
+
+完整矩阵需要在同一 Python 环境里安装 EBU EAR，并提供外部工具路径：
+
+```sh
+python scripts/check_interop.py --ear \
+  --conversion-tool /path/to/cmdline_atmos_conversion_tool \
+  --atmos-info /path/to/atmos_info \
+  --report artifacts/interop.json
+```
+
+**DAMF 读回**：加上 `--damf-format <名称>` 后，对 Conversion Tool 接受的每个输入，再让它输出一份 DAMF，
+用 `mfadm convert` 读回并写成 Standard ADM。这份 DAMF 不是本库写的，正是读取器要面对的真实输入。
+`<名称>` 是你的 Conversion Tool 版本里 `--output_format` 表示 DAMF 的取值（见它的 `--help`），脚本不猜测这个值。
+读回要求能读出来，且写出的 ADM 与源文件 PCM 逐字节一致、采样率、帧数和对象数正确；读取时报告的损失字段与更新数
+记入报告供人工核对，不作为验收条件。`mfadm` 默认从本仓库构建，也可以用 `--mfadm` 指定。
+Conversion Tool 2.1.2 不支持输出 96 kHz DAMF，脚本识别这一明确错误后记录跳过原因，保留原有的 WAV 验收结果。
+其他转换错误与读回错误仍使检查失败。
+
+```sh
+python scripts/check_interop.py --ear \
+  --conversion-tool /path/to/cmdline_atmos_conversion_tool \
+  --atmos-info /path/to/atmos_info \
+  --damf-format <名称> \
+  --report artifacts/interop.json
+```
 
 ## 新库
+
+日期：2026-11-14。
 
 - macOS arm64：fmt、Clippy（所有 target、警告视为错误）、50 项测试通过；1 项实际写入超过 4 GiB 的历史测试保持 ignored。新增虚拟输出测试覆盖该边界而不占用巨型磁盘文件。
 - Windows x64 / Rust MSVC 1.98：50 项通过、同一历史测试 ignored；采用代码提交 2fceb9dd3fc2d163ab1290a07f5be58fae233382。首次 checkout 的换行转换已按 .gitattributes 的 LF 策略刷新，资源哈希与锁定清单一致。
@@ -38,7 +89,7 @@
 - ADM → 同一配置：本库写出的 Standard 与 Logic（默认帧率与 DBMD 字段）读回再写，整个文件逐字节一致。
 - ADM → DAMF → ADM：位置不超过 9 位小数、增益为 1 或静音、默认节目名时逐字节回到原文件；带 dB 增益时经 DAMF 的增益误差小于 1e-9。
 - 手写的第三方 ADM：只在 CHNA 中定义轨道、bed 声道顺序颠倒、每个对象一个 content、对象 `start` / `duration`、未写 `jumpPosition` 的整块插值、dB 增益与对象级增益折算、`mute`；按声道标记值核对了输出声道顺序。
-- 损失与拒绝：逐项覆盖 README 列出的损失字段，以及极坐标、block 空隙、多个 programme、嵌套对象、非 7.1.2 bed 和没有 axml 的文件。
+- 损失与拒绝：逐项覆盖[格式参考](REFERENCE.md#adm-读取与转换)列出的损失字段，以及极坐标、block 空隙、多个 programme、嵌套对象、非 7.1.2 bed 和没有 axml 的文件。
 - 预读过的音频与来自 DAMF 读取器的音频，转换结果与直接转换逐字节相同。
 - 规模：118 个对象、11.8 万个事件、10 秒的 ADM（AXML 57.8 MB），转 DAMF 用时 2.2 秒，峰值内存 642 MiB，约为 AXML 大小的 11 倍。同一 DAMF 经 ADM 再转回 DAMF，清单与音频逐字节一致；元数据里每个对象有一个事件不同，原因是其 ramp 延伸到音频结尾之后，ADM 只记录到结尾为止。
 - 尚未进行：读取其他工具实际产出的 ADM BWF。上面的第三方写法是手写的。
@@ -81,7 +132,7 @@ Standard 必须通过独立 EAR 验证，3DoF 必须通过 atmos_info，Logic/ho
 ## Logic Pro 与 Dolby Atmos Renderer 实机兼容验证
 
 日期为 2026-11-15，生成环境为 macOS arm64，生成代码提交为 `73fc2c7`。
-用户实测确认本次生成的母版兼容 Logic Pro 与 Dolby Atmos Renderer。
+实测确认本次生成的两份母版兼容 Logic Pro 与 Dolby Atmos Renderer。
 
 - 样本为同源合成测试信号，时长 2 秒、48 kHz、24-bit PCM、24 fps，包含一个 7.1.2 bed 和两个对象，
   其中一个对象带位置移动。输出为 `logic_48k24.wav`（Logic RF64 ADM BWF）与 DAMF Home 0.5.1 三件套
