@@ -311,7 +311,7 @@ cargo test --locked -p macin-atmos
 ```
 
 后两条单独检查不开 `read` 的 `macin-atmos`。测试只用仓库内的合成夹具，不需要媒体或外部工具；
-CI 在 macOS arm64 与 Windows x64 上跑同一套检查。外部工具互操作检查器的用法见
+CI 在 macOS arm64、Windows x64 与 Linux x64 上跑同一套检查。外部工具互操作检查器的用法见
 [验证记录](docs/VALIDATION.md#互操作检查器用法)，开发约定见 [AGENTS.md](AGENTS.md)。
 
 ## 文档
@@ -320,6 +320,7 @@ CI 在 macOS arm64 与 Windows x64 上跑同一套检查。外部工具互操作
 
 [验证记录](docs/VALIDATION.md) ·
 [crates.io 发布准备](docs/CRATES_IO_RELEASE.md) ·
+[CLI 下载包与 GitHub 发布](docs/BINARY_RELEASE.md) ·
 [来源清单（SOURCES.json）](docs/SOURCES.json) ·
 [互操作摘要（interop-summary.json）](docs/interop-summary.json)
 

@@ -1,6 +1,6 @@
 [package]
 name = "macin-format"
-description = "Inspection of RIFF/RF64/BW64 and ADM metadata, and DAMF conversion, behind mfadm"
+description = "RIFF/RF64/BW64 and ADM inspection, and ADM/DAMF master conversion with mfadm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

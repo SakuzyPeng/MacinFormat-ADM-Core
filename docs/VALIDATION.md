@@ -17,8 +17,9 @@
 - **不开 `read` 的 `macin-atmos`**：workspace 构建会经由 `macin-format` 打开 `read`，所以只写母版的配置单独跑
   `cargo clippy --locked -p macin-atmos --all-targets -- -D warnings` 与 `cargo test --locked -p macin-atmos`。
 
-原生验证平台为 macOS arm64 与 Windows x64，CI（`.github/workflows/ci.yml`）在这两个平台上跑同一套检查，
-另含互操作检查器自身的 Python 回归（`python -B -m unittest discover -s scripts -p "test_*.py"`）。
+已有实测覆盖 macOS arm64 与 Windows x64。CI（`.github/workflows/ci.yml`）在 macOS arm64、Windows x64 与 Linux x64
+上跑同一套检查，另含互操作检查器、发布归档和产物核验的 Python 回归
+（`python -B -m unittest discover -s scripts -p "test_*.py"`）。
 
 ## 互操作检查器用法
 

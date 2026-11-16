@@ -17,8 +17,8 @@ python -B -m unittest discover -s scripts -p "test_*.py"
 ```
 
 workspace 构建会经由 `macin-format` 打开 `macin-atmos` 的 `read`（Cargo feature 合并），所以只写母版的配置——
-下游消费方实际依赖的那一种——必须用第四、五条单独检查。CI（`.github/workflows/ci.yml`）在 macos-15 与
-windows-2025 上跑上面全部六条。
+下游消费方实际依赖的那一种——必须用第四、五条单独检查。CI（`.github/workflows/ci.yml`）在 macos-15、
+windows-2025 与 ubuntu-24.04 上跑上面全部六条。
 
 `crates/macin-bwf/tests/wave.rs` 里实际写入超过 4 GiB 的测试是 ignored 的，需要 `MRADM_WAV_LARGE_TEST_DIR`
 指向有空间的目录；普通测试用虚拟输出覆盖同一边界。外部工具互操作检查器 `scripts/check_interop.py` 需要调用方提供
@@ -48,6 +48,8 @@ EBU EAR、Conversion Tool、atmos_info，用法见 `docs/VALIDATION.md`；它的
 | `docs/REFERENCE.md` / `docs/REFERENCE.en.md` | 读写规则全集：量化约定、写入规则、四种配置、DAMF / ADM 读取的支持 / 损失 / 拒绝、诊断、`mfadm` 参数、依赖与 feature | 实测数字（只链接到验证记录） |
 | `docs/VALIDATION.md` | 测试覆盖、互操作检查器用法，以及按日期记录的实测：平台、代码提交、工具版本、规模与内存、逐项结果 | 规则本身 |
 | `docs/CRATES_IO_RELEASE.md` | 发版步骤 | |
+| `docs/BINARY_RELEASE.md` | CLI 打包、三平台构建与 GitHub 发布步骤 | 用户发布说明 |
+| `packaging/release-notes.md` | 面向使用者的中英文发布说明、下载与上手 | 构建流水线细节 |
 | `AGENTS.md` | 本文：开发命令、结构、约定 | 用户文档 |
 
 - 两对中英文件同步修改，中文为准。英文版的锚点链接到中文文档时保留中文锚点。

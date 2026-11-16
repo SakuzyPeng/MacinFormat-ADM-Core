@@ -1,4 +1,4 @@
-//! `mfadm`: inspection of RIFF/RF64/BW64 files and their ADM metadata, and DAMF conversion.
+//! `mfadm`: inspection of RIFF/RF64/BW64 files and ADM metadata, and ADM/DAMF conversion.
 #![forbid(unsafe_code)]
 
 use clap::{Args, Parser, Subcommand};
@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Inspect RIFF/RF64/BW64 containers and their ADM metadata, and convert DAMF masters.
+/// Inspect RIFF/RF64/BW64 containers and their ADM metadata, and convert ADM/DAMF masters.
 /// Never modifies an input and never overwrites an output.
 #[derive(Parser)]
 #[command(name = "mfadm", version)]

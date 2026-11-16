@@ -332,7 +332,7 @@ cargo test --locked -p macin-atmos
 ```
 
 The last two check `macin-atmos` without `read` on its own. The tests use only synthetic fixtures in the
-repository and need no media or external tools; CI runs the same checks on macOS arm64 and Windows x64. How to
+repository and need no media or external tools. CI runs the same checks on macOS arm64, Windows x64 and Linux x64. How to
 run the external interop checker is in the [validation record](docs/VALIDATION.md#互操作检查器用法), and the
 development conventions are in [AGENTS.md](AGENTS.md) (both Chinese).
 
@@ -343,6 +343,7 @@ writing rules. The other documents are in Chinese:
 
 [Validation record](docs/VALIDATION.md) ·
 [crates.io release preparation](docs/CRATES_IO_RELEASE.md) ·
+[CLI archives and GitHub releases](docs/BINARY_RELEASE.md) ·
 [Source manifest (SOURCES.json)](docs/SOURCES.json) ·
 [Interop summary (interop-summary.json)](docs/interop-summary.json)
 

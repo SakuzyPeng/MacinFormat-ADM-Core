@@ -1,0 +1,154 @@
+name: Prepare release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHONUTF8: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
+  cli:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            rustflags: ""
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            rustflags: "-C target-feature=+crt-static"
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            rustflags: ""
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ matrix.target }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Build and verify CLI archive
+        run: python scripts/package_release.py --target "$TARGET" --release-tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-${{ matrix.target }}
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  crates:
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Package libraries with read enabled
+        run: cargo package --locked --workspace --exclude macin-format --all-features
+      - name: Verify crates.io upload preparation
+        run: cargo publish --locked --workspace --dry-run
+      - name: Collect library archives
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import shutil
+          import subprocess
+          from scripts.package_release import CRATES, workspace_version
+
+          metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], text=True))
+          source = Path(metadata["target_directory"]) / "package"
+          destination = Path("artifacts/release")
+          destination.mkdir(parents=True, exist_ok=True)
+          for name in CRATES:
+              archive = source / f"{name}-{workspace_version()}.crate"
+              shutil.copy2(archive, destination / archive.name)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crates
+          path: artifacts/release/*.crate
+          if-no-files-found: error
+          retention-days: 14
+
+  bundle:
+    needs: [cli, crates]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts/release
+          merge-multiple: true
+      - name: Verify matching source and checksums
+        run: python scripts/release_assets.py --directory artifacts/release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    if: github.ref_type == 'tag'
+    needs: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: artifacts/release
+      - name: Create or update release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_assets.py --directory artifacts/release --tag "$RELEASE_TAG" --draft

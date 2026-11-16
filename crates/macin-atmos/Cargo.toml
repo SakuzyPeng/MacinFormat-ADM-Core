@@ -1,6 +1,6 @@
 [package]
 name = "macin-atmos"
-description = "Streaming ADM BWF and DAMF Atmos master authoring"
+description = "Streaming ADM BWF and DAMF Atmos master authoring, reading, and conversion"
 readme = "../../README.md"
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE"]
 version.workspace = true
@@ -19,7 +19,7 @@ renamore.workspace = true
 saphyr-parser = { workspace = true, optional = true }
 
 [features]
-# DAMF reading and conversion. Off by default so writers keep their dependency graph.
+# ADM/DAMF reading and conversion. Off by default so writers keep their dependency graph.
 read = ["dep:saphyr-parser"]
 
 [lints]
