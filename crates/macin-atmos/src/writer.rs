@@ -260,6 +260,62 @@ impl MasterWriter {
             return Err(Error::invalid("Output parent must exist"));
         }
         let mut diagnostics = Vec::new();
+        if spec.profile == Profile::Logic
+            && spec
+                .first_action_ns
+                .is_some_and(|ns| dbmd::action_ticks(ns).is_none())
+        {
+            loss(
+                spec.loss_policy,
+                None,
+                None,
+                "ffoa",
+                "First frame of action is outside the DBMD clock",
+                &mut diagnostics,
+            )?;
+            spec.first_action_ns = None;
+        }
+        if spec.dbmd_sidecar.as_ref().is_some_and(|s| {
+            s.unmapped
+                && (spec.profile.is_adm()
+                    || s.compression != spec.ddplus_compression
+                    || s.origin.as_ref().is_none_or(|o| !o.matches(&spec, None)))
+        }) {
+            loss(
+                spec.loss_policy,
+                None,
+                None,
+                "dbmd_sidecar",
+                "Unmapped sidecar values require the original DAMF audio, layout and encoding settings",
+                &mut diagnostics,
+            )?;
+            spec.dbmd_sidecar = None;
+        }
+        if !spec.profile.is_adm() && !spec.ddplus_compression.portable() {
+            loss(
+                spec.loss_policy,
+                None,
+                None,
+                "dbmd_encoding",
+                "DAMF has no verified spelling for this DD+ compression profile",
+                &mut diagnostics,
+            )?;
+            spec.ddplus_compression.use_portable_defaults();
+        }
+        if spec.dbmd_source.as_ref().is_some_and(|s| {
+            (spec.profile != Profile::Logic && s.requires_dbmd())
+                || (s.extra_encoding && s.origin.as_ref().is_some_and(|o| !o.matches(&spec, None)))
+        }) {
+            loss(
+                spec.loss_policy,
+                None,
+                None,
+                "dbmd_encoding",
+                "Original DBMD encoding data requires a Logic output with the original audio and channel order",
+                &mut diagnostics,
+            )?;
+            spec.dbmd_source = None;
+        }
         if spec
             .container_metadata
             .as_ref()
@@ -399,13 +455,23 @@ impl MasterWriter {
             for (field, lost) in [
                 ("screen_size_ratio", spec.screen_size_ratio != 1.),
                 (
+                    "ffoa",
+                    spec.profile == Profile::Standard && spec.first_action_ns.is_some(),
+                ),
+                (
+                    "dbmd_encoding",
+                    spec.profile == Profile::Standard
+                        && spec.ddplus_compression != dbmd::DdPlusCompression::default(),
+                ),
+                (
                     "bed_distribution",
                     spec.profile == Profile::Standard
                         && (spec.bed_distribution || !spec.bed_distribution_present),
                 ),
                 (
                     "warp_mode",
-                    spec.profile == Profile::Standard && spec.warp_mode != WarpMode::LoRo,
+                    spec.profile == Profile::Standard
+                        && !matches!(spec.warp_mode, WarpMode::LoRo | WarpMode::NotIndicated),
                 ),
                 (
                     "sc_bed_configuration",
@@ -413,7 +479,11 @@ impl MasterWriter {
                 ),
                 (
                     "downmix_type",
-                    spec.profile == Profile::Standard && spec.downmix_mode != DownmixMode::LoRo,
+                    spec.profile == Profile::Standard
+                        && !matches!(
+                            spec.downmix_mode,
+                            DownmixMode::LoRo | DownmixMode::NotIndicated
+                        ),
                 ),
                 (
                     "ls_rs_phase_shift",
@@ -422,7 +492,7 @@ impl MasterWriter {
                 (
                     "trim_mode",
                     spec.profile == Profile::Standard
-                        && spec.trim_mode != [Some(TrimValues::default()); 4],
+                        && spec.trim_mode != TrimConfiguration::defaults(),
                 ),
             ] {
                 if lost {
@@ -742,7 +812,8 @@ impl MasterWriter {
                     ),
                     (
                         "bed_trim_bypass",
-                        source.trim_bypass != previous.2.trim_bypass,
+                        source.trim_bypass != previous.2.trim_bypass
+                            || source.trim_bypass_unspecified != previous.2.trim_bypass_unspecified,
                     ),
                 ] {
                     if changed {
@@ -764,9 +835,14 @@ impl MasterWriter {
                 }
                 state.binaural_mode = previous.2.binaural_mode;
                 state.trim_bypass = previous.2.trim_bypass;
+                state.trim_bypass_unspecified = previous.2.trim_bypass_unspecified;
             }
             let mut mapped_event = *event;
             mapped_event.patch = patch;
+            if !self.spec.profile.is_adm() && patch.trim_bypass_unspecified {
+                mapped_event.patch.trim_bypass = Some(false);
+                mapped_event.patch.trim_bypass_unspecified = false;
+            }
             if mapped_event.patch.binaural_mode == Some(BinauralMode::Mid) {
                 mapped_event.patch.binaural_mode = Some(state.binaural_mode);
             }
@@ -936,7 +1012,9 @@ impl MasterWriter {
                     ),
                     (
                         "trim_bypass",
-                        state.trim_bypass != previous.initial_static.trim_bypass,
+                        state.trim_bypass != previous.initial_static.trim_bypass
+                            || state.trim_bypass_unspecified
+                                != previous.initial_static.trim_bypass_unspecified,
                     ),
                 ] {
                     if changed {
@@ -953,6 +1031,10 @@ impl MasterWriter {
                 state = previous.initial_static.apply(state);
             }
             let mut mapped_event = *event;
+            if !self.spec.profile.is_adm() && mapped_event.patch.trim_bypass_unspecified {
+                mapped_event.patch.trim_bypass = Some(false);
+                mapped_event.patch.trim_bypass_unspecified = false;
+            }
             if !self.spec.profile.is_adm()
                 && mapped_event.patch.binaural_mode == Some(BinauralMode::Mid)
             {
@@ -1209,7 +1291,39 @@ impl MasterWriter {
             )?;
             self.spec.container_metadata = None;
         }
+        if self.spec.dbmd_source.as_ref().is_some_and(|s| {
+            s.extra_encoding
+                && s.origin
+                    .as_ref()
+                    .is_some_and(|o| !o.matches(&self.spec, Some(self.frames)))
+        }) {
+            loss(
+                self.spec.loss_policy,
+                None,
+                None,
+                "dbmd_encoding",
+                "Changing the audio duration invalidates the original DBMD encoding data",
+                &mut self.diagnostics,
+            )?;
+            self.spec.dbmd_source = None;
+        }
         let mut axml_bytes = 0;
+        if self.spec.dbmd_sidecar.as_ref().is_some_and(|s| {
+            s.unmapped
+                && s.origin
+                    .as_ref()
+                    .is_some_and(|o| !o.matches(&self.spec, Some(self.frames)))
+        }) {
+            loss(
+                self.spec.loss_policy,
+                None,
+                None,
+                "dbmd_sidecar",
+                "Changing the audio duration invalidates the original DBMD sidecar",
+                &mut self.diagnostics,
+            )?;
+            self.spec.dbmd_sidecar = None;
+        }
         let mut dbmd_bytes = 0;
         match self
             .audio
@@ -1348,6 +1462,21 @@ impl MasterWriter {
                     File::create(self.temp.join(format!("{}.atmos", self.spec.stem)))?;
                 manifest.write_all(metadata::damf_manifest(&self.spec)?.as_bytes())?;
                 manifest.sync_all()?;
+                if self.spec.dbmd_sidecar.is_some()
+                    || self.spec.ddplus_compression != dbmd::DdPlusCompression::default()
+                {
+                    let text = match &self.spec.dbmd_sidecar {
+                        Some(s) if s.compression == self.spec.ddplus_compression => {
+                            std::borrow::Cow::Borrowed(s.as_str())
+                        }
+                        _ => std::borrow::Cow::Owned(self.spec.ddplus_compression.yaml()?),
+                    };
+                    let mut file =
+                        File::create(self.temp.join(format!("{}.atmos.dbmd", self.spec.stem)))?;
+                    file.write_all(text.as_bytes())?;
+                    file.sync_all()?;
+                    dbmd_bytes = text.len();
+                }
             }
         }
         self.tracks.clear();
@@ -1733,6 +1862,17 @@ fn mapped(
 ) -> Result<ObjectState> {
     state.validate()?;
     let policy = options.loss_policy;
+    if profile != Profile::Logic && state.trim_bypass_unspecified {
+        loss(
+            policy,
+            Some(id),
+            Some(sample),
+            "trim_bypass",
+            "Target cannot preserve the DBMD not-indicated trim bypass value",
+            diagnostics,
+        )?;
+        state.trim_bypass_unspecified = false;
+    }
     let approximations = options.approximate_mappings;
     if !profile.is_adm()
         && options.preserve_literal.damf_mid
@@ -2029,6 +2169,17 @@ fn mapped_bed(
     diagnostics: &mut Vec<MappingDiagnostic>,
 ) -> Result<BedState> {
     state.validate()?;
+    if profile != Profile::Logic && state.trim_bypass_unspecified {
+        loss(
+            policy,
+            None,
+            Some(sample),
+            "bed_trim_bypass",
+            "Target cannot preserve the DBMD not-indicated bed trim bypass value",
+            diagnostics,
+        )?;
+        state.trim_bypass_unspecified = false;
+    }
     let default = BedState::for_channel(channel);
     if !profile.is_adm() && preserve.damf_mid && state.binaural_mode == BinauralMode::Mid {
         literal(

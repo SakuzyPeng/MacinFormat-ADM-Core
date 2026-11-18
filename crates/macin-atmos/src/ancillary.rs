@@ -31,6 +31,20 @@ pub(crate) struct Origin {
     pub object_tracks: Vec<crate::TrackId>,
     pub unchanged: bool,
 }
+impl Origin {
+    pub(crate) fn matches(&self, spec: &MasterSpec, frames: Option<u64>) -> bool {
+        self.unchanged
+            && self.channels == spec.channels()
+            && self.sample_rate == spec.sample_rate
+            && self.start_sample == spec.start_sample
+            && self
+                .object_tracks
+                .iter()
+                .copied()
+                .eq(spec.objects.iter().map(|o| o.id))
+            && frames.is_none_or(|f| f == self.frames)
+    }
+}
 impl MetadataContainer {
     pub(crate) fn accepts(self, id: [u8; 4]) -> bool {
         match self {
@@ -121,16 +135,6 @@ impl ContainerMetadata {
     pub(crate) fn matches(&self, spec: &MasterSpec, frames: Option<u64>) -> bool {
         self.chunks.is_empty()
             || (self.container == MetadataContainer::Wave) == spec.profile.is_adm()
-                && self.origin.as_ref().is_none_or(|o| {
-                    o.unchanged
-                        && o.channels == spec.channels()
-                        && o.sample_rate == spec.sample_rate
-                        && o.start_sample == spec.start_sample
-                        && o.object_tracks
-                            .iter()
-                            .copied()
-                            .eq(spec.objects.iter().map(|o| o.id))
-                        && frames.is_none_or(|f| f == o.frames)
-                })
+                && self.origin.as_ref().is_none_or(|o| o.matches(spec, frames))
     }
 }

@@ -118,17 +118,12 @@ ITU-R BS.2088-2 Annex 1 §2.1, §4 and §5.
   `warp_mode` and `trim_mode`. Configuration codes are unique values in 0..=8; an empty model set means
   unspecified DBMD and can be retained in Logic. Missing or empty DAMF input lists mean `[3]`, so DAMF cannot
   express that unspecified state: Reject refuses it and Allow diagnoses it and uses `[3]`.
-  Downmix values are LoRo_Stereo / LtRt_ProLogic / LtRt_PLII, and warp
-  values are LoRo / ProLogicIIx / warping / normal. `WarpMode::None` remains an API alias for Normal;
-  legacy input `None` is normalised to normal.
-- `bed_distribution_present` distinguishes unspecified from explicit false/true. The default is explicit
-  false, and an unspecified value must be false. `set_bed_distribution(Option<bool>)` sets both fields.
-  An unspecified setting is omitted in DAMF and retained as unspecified in DBMD.
-- `trim_mode` follows the four entries of `TrimConfiguration::ALL`. None is automatic; Some(default) is an
-  empty manual configuration. All four default to Some(default); missing input configurations become None.
-  The three trims must be finite values that remain finite as f32, and both front/back balances must be in
-  -1..=1. Logic uses native f32 precision and rounds balance multiplied by 127 to the nearest integer, ties
-  away from zero; this is declared storage precision. DAMF uses its text number precision.
+  Downmix accepts `LoRo_Stereo`, `LtRt_ProLogic`, `LtRt_PLII` and `directRender`. Warp accepts LoRo, ProLogicIIx, warping and normal. `WarpMode::None` remains an alias for Normal.
+- Omitting warp, downmix or the 90° phase shift in DAMF maps to DBMD codes 4, 0 and 3 respectively. The first two use `NotIndicated`. Use `set_surround_phase_shift(Option<bool>)` for phase shift. DAMF omits unspecified keys and writes explicit settings. Newly authored masters retain the LoRo, LoRo and explicit-off defaults.
+- `first_action_ns` holds the first frame of action (FFOA) in signed integer nanoseconds, independently of programme start. DAMF uses seconds for `ffoa`, preserves explicit zero and omits an unspecified value. Logic stores hours, minutes and 1/100,000 seconds, rounding to the nearest 10 µs. A set high bit in the hour byte indicates an unspecified time, encoded as 0xff on creation. An out-of-range value or a Standard target follows the `ffoa` loss policy.
+- `bed_distribution_present` distinguishes unspecified from explicit false or true. The default is explicit false. Use `set_bed_distribution(Option<bool>)` to set both fields. DAMF omits an unspecified setting and DBMD keeps its native state.
+- `trim_mode` has nine slots in `TrimConfiguration::ALL` order. The original indices correspond to 5.1, 5.1.2, 5.1.4 and 7.1. The additional slots are 2.0, 2.1.2, 7.1.2, 2.1.4 and 7.1.4. New masters use empty manual trims in the first four slots and automatic trims elsewhere. Omitted DAMF slots are automatic. The three gains use finite f32 values. Both front/back balances range from −1 to 1. The low seven bits store the nearest integer to 127 times the absolute value. A high bit of zero indicates negative and one indicates positive. Both zero codes are accepted. New zeros use 0x80 and native rewrites retain the source zero code.
+- DBMD channel trimBypass code 2 uses `trim_bypass_unspecified` on beds and objects. An explicit boolean update clears it. DAMF and Standard targets follow the `trim_bypass` or `bed_trim_bypass` policy, using false when loss is allowed.
 - Standard cannot carry non-default DBMD presentation settings and reports them by field. Unspecified
   bedDistribution and automatic trims differ from its explicit-false / empty-manual defaults and also report
   a loss. Neither ADM profile maps screen_size_ratio. External checks of static channels, presets and presentation settings are
@@ -215,6 +210,7 @@ unchanged, and what the model cannot hold while reading follows the same `LossPo
   n and a sample rate that must match the metadata. 16/24-bit PCM converts exactly; 32-bit PCM and float are
   quantised to 24 bits as declared format behaviour, and float samples beyond ±1 are an error.
 - **Read-time losses** include unknown keys (`unknown_field`), a nonzero ramp without a continuous property (`ramp` / `bed_ramp`), missing sample-zero object state (`initial_state`), simplified=true and unidentified trim settings (`trim_mode`). A bed without an initial event uses its canonical channel defaults.
+- An optional matching `.atmos.dbmd` file holds YAML encoding settings. `ddplus.compr1` and `ddplus.dynrng1` map to programme zero's RF and Line compression in DD+ segment 7. The six portable values are none, film_standard, film_light, music_standard, music_light and speech. Non-default settings generate a sidecar on Logic-to-DAMF conversion. A native rewrite retains source text and unmapped keys with matching audio, layout and compression settings. When the text cannot be retained, `dbmd_sidecar` governs the loss and Allow keeps the mapped compression settings.
 - **Container metadata**: CAF headers before and after data are scanned. info follows the
   [ancillary preservation rules](#native-adm-metadata-and-ancillary-chunks); other non-desc/data/free chunks
   follow `container_metadata`. Only supported payloads within budget are loaded. Bad sizes and duplicate
@@ -258,15 +254,14 @@ the Atmos one: the structure this library writes, and the same shape from other 
   length while preserving finite source programme, object and bed end boundaries. Shortening replacement audio clips bed duration to the output span. Later updates still need corresponding audio.
 - **Head locking and zones**: object headLocked supplies the block default, which a block can override.
   An omitted value returns to the object default. A match on every preset name, bound and combination uses that preset, including the ZB/ZT elevation pair. Other complete zones retain their native values. An omitted zoneExclusion resets to All / elevation=true and clears the custom list.
-- **DBMD**: static channel metadata is read by source channel index and reordered with the audio. XML head
-  locking conflicting with DBMD fails under Reject; Allow keeps DBMD with a diagnostic. Unknown versions
-  (`dbmd`), encoding settings or segments (`dbmd_encoding`), frame rates, configuration bits, trims or channel
-  modes follow the corresponding field's loss policy; Allow retains recognised portions. Invalid checksums,
-  duplicate segments, bad sizes or a mismatched channel count are invalid input, rejected even under Allow.
+- **DBMD** reads static channel metadata by source channel and remaps it with the PCM. Conflicting XML head locking fails under Reject. Allow keeps DBMD with a diagnostic. Verified segment layouts for versions 1.0.0.5 through 1.0.0.8 are supported. Logic preserves the source version and writes 1.0.0.6 for a new chunk. Segment 9 stores the frame rate in the low nibble. Logic preserves the original upper nibble. Unknown versions report `dbmd`. Unknown frame rate, head tracking, binaural, warp, downmix or invalid phase shift values use their field-specific diagnostic.
+- `dbmd_source` retains native segment order. Logic preserves EBU Dolby E (1), Dolby Digital (3), DD+ (7), Audio Info (8), other opaque payloads and reserved bytes. Different programmes can have repeated segment types. Each of types 1, 9 and 10 must be unique. One alignment byte may follow the terminator. A zero size code represents 65,535 bytes and the checksum uses the low byte of the encoded size. Invalid checksums, truncation and malformed lengths are rejected. Segment 10 may have an extension tail. Its channel count must match the source or be zero.
+- Layout-dependent opaque encoding data requires the original audio, channel order, rate, programme start and duration. When a target cannot retain the native payload, Reject fails and Allow reports `dbmd_encoding` and retains the mapped fields. The model updates compression profiles, per-channel settings and automatic/manual trims. The DBMD chunk and the legacy DAMF sidecar each have a 1 MiB limit.
 - **IDs and channels**: objects are ordered by track, and an object's `TrackId` is its 1-based track in the
   file; with `wave_audio` in place of the file's audio, channel n carries track n + 1. A file without a bed is
   written with a silent bed.
 - **Read-time losses** include unmapped elements and attributes (`unknown_field`), incomplete or unrecognised zone geometry (`zone`), object position bound (`position_bound`) and multiple or nested pack references (`pack_structure`). Complete native fields are checked against each target on output. Ancillary chunks follow the container rules above.
+- A stream can explicitly reference its track's assigned pack. The ADM writer rebinds the reference to the generated pack ID. Repeated, dangling or conflicting references follow `pack_structure`.
 - **Track extension attributes** live in `ChannelNames::extensions` under stream, track and uid. ADM writes each attribute on its owner with its prefix, namespace URI, local name and value, and declares known prefixes used inside that value. Tabs and line breaks use XML character references. Vendor-specific identifiers and relative paths in values remain opaque text. DAMF output reports `track_extensions`.
 - **Refused outright**: several programmes, several beds, an incomplete or non-7.1.2 bed, polar objects,
   multi-channel `Objects`, nested objects, HOA and other `typeDefinition`s, gaps or overlaps between blocks, and

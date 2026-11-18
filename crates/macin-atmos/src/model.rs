@@ -4,6 +4,9 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+pub(crate) const DEFAULT_DBMD_ORIGINATOR: &str = "Created by MacinFormat";
+pub(crate) const DEFAULT_DBMD_PRODUCT: &str = "MacinFormat ADM Core";
+
 pub const BED_CHANNELS: usize = 10;
 pub const MAX_OBJECTS: usize = 118;
 pub const BED_LABELS: [&str; 10] = [
@@ -241,6 +244,8 @@ pub struct ObjectState {
     /// X/Z 轴分别接受 left/right 与 top/bottom；Y 不允许锁定。
     pub screen_edge_lock: [Option<ScreenEdge>; 3],
     pub trim_bypass: bool,
+    /// DBMD 码 2，未指定是否跳过 trim。
+    pub trim_bypass_unspecified: bool,
     /// DAMF classification: -1 unspecified, 0 false, 1 true.
     pub dialog: i8,
     pub music: i8,
@@ -268,6 +273,7 @@ impl Default for ObjectState {
             channel_lock_distance: None,
             screen_edge_lock: [None; 3],
             trim_bypass: false,
+            trim_bypass_unspecified: false,
             dialog: -1,
             music: -1,
             head_tracking: HeadTracking::SceneRelative,
@@ -277,6 +283,9 @@ impl Default for ObjectState {
 }
 impl ObjectState {
     pub fn validate(&self) -> Result<()> {
+        if self.trim_bypass && self.trim_bypass_unspecified {
+            return Err(Error::invalid("Conflicting trim bypass values"));
+        }
         if self
             .position
             .iter()
@@ -367,6 +376,8 @@ pub struct ObjectPatch {
     pub channel_lock_distance: Option<Option<f64>>,
     pub screen_edge_lock: Option<[Option<ScreenEdge>; 3]>,
     pub trim_bypass: Option<bool>,
+    /// true 将本次更新设为未指定，普通布尔更新会清除此标记。
+    pub trim_bypass_unspecified: bool,
     pub dialog: Option<i8>,
     pub music: Option<i8>,
     pub head_tracking: Option<HeadTracking>,
@@ -393,6 +404,7 @@ impl ObjectPatch {
             channel_lock_distance: Some(s.channel_lock_distance),
             screen_edge_lock: Some(s.screen_edge_lock),
             trim_bypass: Some(s.trim_bypass),
+            trim_bypass_unspecified: s.trim_bypass_unspecified,
             dialog: Some(s.dialog),
             music: Some(s.music),
             head_tracking: Some(s.head_tracking),
@@ -401,6 +413,10 @@ impl ObjectPatch {
     }
     pub fn apply(self, mut s: ObjectState) -> ObjectState {
         macro_rules! fields { ($($field:ident),*) => { $(if let Some(value) = self.$field { s.$field = value; })* }; }
+        if self.trim_bypass.is_some() || self.trim_bypass_unspecified {
+            s.trim_bypass_unspecified = self.trim_bypass_unspecified;
+            s.trim_bypass = false;
+        }
         fields!(
             active,
             position,
@@ -474,6 +490,8 @@ impl ObjectSpec {
 /// 未指定时从对象名或固定 bed 名称生成；用于 ADM 同格式保留独立名称。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChannelNames {
+    /// stream 上显式引用所属 pack。写出时重新绑定生成的 pack ID。
+    pub stream_pack_ref: bool,
     pub channel: Option<String>,
     pub stream: Option<String>,
     pub track: Option<String>,
@@ -498,6 +516,7 @@ pub enum WarpMode {
     ProLogicIIx,
     Warping,
     Normal,
+    NotIndicated,
 }
 impl WarpMode {
     /// 旧 API 的无 warp 名称；输出使用已验证的 normal 拼写。
@@ -510,6 +529,7 @@ impl WarpMode {
             Self::ProLogicIIx => "ProLogicIIx",
             Self::Warping => "warping",
             Self::Normal => "normal",
+            Self::NotIndicated => "not indicated",
         }
     }
 }
@@ -520,6 +540,8 @@ pub enum DownmixMode {
     LoRo,
     LtRtProLogic,
     LtRtPlII,
+    DirectRender,
+    NotIndicated,
 }
 impl DownmixMode {
     pub fn as_str(self) -> &'static str {
@@ -527,6 +549,8 @@ impl DownmixMode {
             Self::LoRo => "LoRo_Stereo",
             Self::LtRtProLogic => "LtRt_ProLogic",
             Self::LtRtPlII => "LtRt_PLII",
+            Self::DirectRender => "directRender",
+            Self::NotIndicated => "not indicated",
         }
     }
 }
@@ -537,21 +561,26 @@ pub enum TrimConfiguration {
     SomeSurroundsSomeHeights,
     SomeSurroundsManyHeights,
     ManySurroundsNoHeights,
+    NoSurroundsNoHeights,
+    NoSurroundsSomeHeights,
+    ManySurroundsSomeHeights,
+    NoSurroundsManyHeights,
+    ManySurroundsManyHeights,
 }
 impl TrimConfiguration {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 9] = [
         Self::SomeSurroundsNoHeights,
         Self::SomeSurroundsSomeHeights,
         Self::SomeSurroundsManyHeights,
         Self::ManySurroundsNoHeights,
+        Self::NoSurroundsNoHeights,
+        Self::NoSurroundsSomeHeights,
+        Self::ManySurroundsSomeHeights,
+        Self::NoSurroundsManyHeights,
+        Self::ManySurroundsManyHeights,
     ];
     pub fn index(self) -> usize {
-        match self {
-            Self::SomeSurroundsNoHeights => 0,
-            Self::SomeSurroundsSomeHeights => 1,
-            Self::SomeSurroundsManyHeights => 2,
-            Self::ManySurroundsNoHeights => 3,
-        }
+        self as usize
     }
     pub fn as_str(self) -> &'static str {
         match self {
@@ -559,10 +588,18 @@ impl TrimConfiguration {
             Self::SomeSurroundsSomeHeights => "SomeSurroundsSomeHeights",
             Self::SomeSurroundsManyHeights => "SomeSurroundsManyHeights",
             Self::ManySurroundsNoHeights => "ManySurroundsNoHeights",
+            Self::NoSurroundsNoHeights => "NoSurroundsNoHeights",
+            Self::NoSurroundsSomeHeights => "NoSurroundsSomeHeights",
+            Self::ManySurroundsSomeHeights => "ManySurroundsSomeHeights",
+            Self::NoSurroundsManyHeights => "NoSurroundsManyHeights",
+            Self::ManySurroundsManyHeights => "ManySurroundsManyHeights",
         }
     }
     pub(crate) fn dbmd_index(self) -> usize {
-        [1, 4, 7, 2][self.index()]
+        [1, 4, 7, 2, 0, 3, 5, 6, 8][self.index()]
+    }
+    pub(crate) fn defaults() -> [Option<TrimValues>; 9] {
+        std::array::from_fn(|i| (i < 4).then(TrimValues::default))
     }
 }
 
@@ -595,6 +632,8 @@ pub struct StaticChannelMetadata {
     pub head_tracking: HeadTracking,
     pub binaural_mode: BinauralMode,
     pub trim_bypass: bool,
+    /// DBMD 码 2，未指定是否跳过 trim。
+    pub trim_bypass_unspecified: bool,
 }
 impl From<ObjectState> for StaticChannelMetadata {
     fn from(state: ObjectState) -> Self {
@@ -602,6 +641,7 @@ impl From<ObjectState> for StaticChannelMetadata {
             head_tracking: state.head_tracking,
             binaural_mode: state.binaural_mode,
             trim_bypass: state.trim_bypass,
+            trim_bypass_unspecified: state.trim_bypass_unspecified,
         }
     }
 }
@@ -610,6 +650,7 @@ impl StaticChannelMetadata {
         state.head_tracking = self.head_tracking;
         state.binaural_mode = self.binaural_mode;
         state.trim_bypass = self.trim_bypass;
+        state.trim_bypass_unspecified = self.trim_bypass_unspecified;
         state
     }
 }
@@ -702,6 +743,8 @@ pub struct BedState {
     pub head_tracking: HeadTracking,
     pub binaural_mode: BinauralMode,
     pub trim_bypass: bool,
+    /// DBMD 码 2，未指定是否跳过 trim。
+    pub trim_bypass_unspecified: bool,
 }
 impl Default for BedState {
     fn default() -> Self {
@@ -713,6 +756,7 @@ impl Default for BedState {
             head_tracking: HeadTracking::SceneRelative,
             binaural_mode: BinauralMode::Undefined,
             trim_bypass: false,
+            trim_bypass_unspecified: false,
         }
     }
 }
@@ -738,6 +782,7 @@ impl BedState {
             head_tracking: self.head_tracking,
             binaural_mode: self.binaural_mode,
             trim_bypass: self.trim_bypass,
+            trim_bypass_unspecified: self.trim_bypass_unspecified,
             ..ObjectState::default()
         })
     }
@@ -748,6 +793,7 @@ impl From<BedState> for StaticChannelMetadata {
             head_tracking: state.head_tracking,
             binaural_mode: state.binaural_mode,
             trim_bypass: state.trim_bypass,
+            trim_bypass_unspecified: state.trim_bypass_unspecified,
         }
     }
 }
@@ -760,6 +806,8 @@ pub struct BedPatch {
     pub head_tracking: Option<HeadTracking>,
     pub binaural_mode: Option<BinauralMode>,
     pub trim_bypass: Option<bool>,
+    /// true 将本次更新设为未指定，普通布尔更新会清除此标记。
+    pub trim_bypass_unspecified: bool,
 }
 impl BedPatch {
     pub fn full(state: BedState) -> Self {
@@ -771,10 +819,15 @@ impl BedPatch {
             head_tracking: Some(state.head_tracking),
             binaural_mode: Some(state.binaural_mode),
             trim_bypass: Some(state.trim_bypass),
+            trim_bypass_unspecified: state.trim_bypass_unspecified,
         }
     }
     pub fn apply(self, mut state: BedState) -> BedState {
         macro_rules! fields { ($($field:ident),*) => { $(if let Some(value) = self.$field { state.$field = value; })* }; }
+        if self.trim_bypass.is_some() || self.trim_bypass_unspecified {
+            state.trim_bypass_unspecified = self.trim_bypass_unspecified;
+            state.trim_bypass = false;
+        }
         fields!(
             active,
             gain,
@@ -797,6 +850,7 @@ impl BedPatch {
             head_tracking: self.head_tracking,
             binaural_mode: self.binaural_mode,
             trim_bypass: self.trim_bypass,
+            trim_bypass_unspecified: self.trim_bypass_unspecified,
             ..self.rendering.properties()
         }
     }
@@ -858,11 +912,18 @@ pub struct MasterSpec {
     pub contents: Vec<ContentSpec>,
     /// 节目在外部时间线中的起点；事件仍相对于音频第 0 个采样。
     pub start_sample: u64,
+    /// 首个动作帧在外部时间线上的时间，单位为纳秒，与节目起点相互独立。
+    pub first_action_ns: Option<i64>,
     /// 空集合表示 DBMD 未指定；DAMF 的缺省或空输入列表表示 [3]。
     pub sc_bed_configuration: Vec<u8>,
     pub downmix_mode: DownmixMode,
     pub surround_phase_shift: bool,
-    pub trim_mode: [Option<TrimValues>; 4],
+    pub surround_phase_shift_present: bool,
+    pub trim_mode: [Option<TrimValues>; 9],
+    /// 从源 DBMD 读取的段结构及保留字节。Logic 写出会更新已建模的字段。
+    pub dbmd_source: Option<crate::dbmd::DbmdSource>,
+    pub ddplus_compression: crate::dbmd::DdPlusCompression,
+    pub dbmd_sidecar: Option<crate::dbmd::DbmdSidecar>,
     pub creation_tool: String,
     pub creation_tool_version: String,
     /// Logic DBMD's fixed-width ASCII originator (32) and product (64) fields.
@@ -901,14 +962,19 @@ impl Default for MasterSpec {
             container_metadata: None,
             contents: Vec::new(),
             start_sample: 0,
+            first_action_ns: None,
             sc_bed_configuration: vec![3],
             downmix_mode: DownmixMode::LoRo,
             surround_phase_shift: false,
-            trim_mode: [Some(TrimValues::default()); 4],
+            surround_phase_shift_present: true,
+            trim_mode: TrimConfiguration::defaults(),
+            dbmd_source: None,
+            ddplus_compression: Default::default(),
+            dbmd_sidecar: None,
             creation_tool: "MacinFormat-ADM-Core".into(),
             creation_tool_version: env!("CARGO_PKG_VERSION").into(),
-            dbmd_originator: "Created by MacinFormat".into(),
-            dbmd_product: "MacinFormat ADM Core".into(),
+            dbmd_originator: DEFAULT_DBMD_ORIGINATOR.into(),
+            dbmd_product: DEFAULT_DBMD_PRODUCT.into(),
             screen_size_ratio: 1.,
             bed_distribution: false,
             bed_distribution_present: true,
@@ -918,6 +984,10 @@ impl Default for MasterSpec {
     }
 }
 impl MasterSpec {
+    pub fn set_surround_phase_shift(&mut self, value: Option<bool>) {
+        self.surround_phase_shift = value.unwrap_or(false);
+        self.surround_phase_shift_present = value.is_some();
+    }
     pub fn set_bed_distribution(&mut self, value: Option<bool>) {
         self.bed_distribution = value.unwrap_or(false);
         self.bed_distribution_present = value.is_some();
@@ -928,6 +998,9 @@ impl MasterSpec {
     pub fn validate(&self) -> Result<()> {
         if let Some(metadata) = &self.container_metadata {
             metadata.validate()?;
+        }
+        if !self.surround_phase_shift_present && self.surround_phase_shift {
+            return Err(Error::invalid("Conflicting surround phase shift values"));
         }
         if !self.bed_distribution_present && self.bed_distribution {
             return Err(Error::invalid(

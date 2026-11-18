@@ -272,6 +272,7 @@ fn bed_patch(patch: ObjectPatch) -> BedPatch {
         head_tracking: patch.head_tracking,
         binaural_mode: patch.binaural_mode,
         trim_bypass: patch.trim_bypass,
+        trim_bypass_unspecified: patch.trim_bypass_unspecified,
     }
 }
 
@@ -412,6 +413,38 @@ impl DamfReader {
         reader.spec.approximate_mappings = options.approximate_mappings;
         reader.spec.preserve_literal = options.preserve_literal;
         reader.scan(&mut diagnostics)?;
+        let sidecar = manifest.with_added_extension("dbmd");
+        match File::open(&sidecar) {
+            Ok(file) => {
+                let parsed = yaml::read_text(file, dbmd::DBMD_LIMIT as u64, "DAMF DBMD sidecar")
+                    .and_then(dbmd::DbmdSidecar::parse);
+                match parsed {
+                    Ok(mut value) => {
+                        if value.unmapped {
+                            value.origin = reader
+                                .audio()
+                                .ok()
+                                .map(|a| a.metadata_origin(&reader.spec, a.frames(), true));
+                        }
+                        reader.spec.ddplus_compression = value.compression;
+                        reader.spec.dbmd_sidecar = Some(value);
+                    }
+                    Err(e) if e.kind != ErrorKind::Io => Losses {
+                        policy: options.loss_policy,
+                        diagnostics: &mut diagnostics,
+                    }
+                    .report(
+                        None,
+                        None,
+                        "dbmd_sidecar",
+                        format!("Cannot interpret DBMD sidecar: {e}"),
+                    )?,
+                    Err(e) => return Err(located(&sidecar, e)),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(located(&sidecar, e.into())),
+        }
         reader.diagnostics = diagnostics;
         Ok(reader)
     }
@@ -468,12 +501,13 @@ impl DamfReader {
                 ));
             }
         };
-        const KNOWN: [&str; 17] = [
+        const KNOWN: [&str; 18] = [
             "type",
             "simplified",
             "metadata",
             "audio",
             "offset",
+            "ffoa",
             "fps",
             "scBedConfiguration",
             "creationTool",
@@ -498,8 +532,16 @@ impl DamfReader {
         let mut spec = MasterSpec {
             profile,
             loss_policy: policy,
+            downmix_mode: DownmixMode::NotIndicated,
+            warp_mode: WarpMode::NotIndicated,
             ..MasterSpec::default()
         };
+        if let Some(node) = get(p, "ffoa") {
+            spec.first_action_ns = Some(
+                crate::metadata::parse_action_seconds(node.as_text("ffoa")?)
+                    .map_err(|e| yaml::invalid(node.line(), e.message))?,
+            );
+        }
         if let Some(stem) = manifest
             .file_name()
             .and_then(|n| n.to_str())
@@ -547,6 +589,7 @@ impl DamfReader {
                 "LoRo_Stereo" => DownmixMode::LoRo,
                 "LtRt_ProLogic" => DownmixMode::LtRtProLogic,
                 "LtRt_PLII" => DownmixMode::LtRtPlII,
+                "directRender" => DownmixMode::DirectRender,
                 other => {
                     return Err(unsupported(
                         node.line(),
@@ -555,10 +598,12 @@ impl DamfReader {
                 }
             };
         }
-        if let Some(node) = get(p, "51-to-20_LsRs90degPhaseShift") {
-            spec.surround_phase_shift = node.as_bool("51-to-20_LsRs90degPhaseShift")?;
-        }
-        spec.trim_mode = [None; 4];
+        spec.set_surround_phase_shift(
+            get(p, "51-to-20_LsRs90degPhaseShift")
+                .map(|n| n.as_bool("51-to-20_LsRs90degPhaseShift"))
+                .transpose()?,
+        );
+        spec.trim_mode = [None; 9];
         if let Some(node) = get(p, "trimMode") {
             for (name, settings) in node.as_mapping("trimMode")? {
                 let Some(config) = TrimConfiguration::ALL
@@ -1033,6 +1078,14 @@ impl DamfReader {
             policy: spec.loss_policy,
             diagnostics: &mut diagnostics,
         };
+        let sidecar_origin = spec
+            .dbmd_sidecar
+            .as_ref()
+            .filter(|s| s.unmapped)
+            .map(|_| audio.metadata_origin(&spec, audio.frames(), original_audio));
+        if let Some(sidecar) = &mut spec.dbmd_sidecar {
+            sidecar.origin = sidecar_origin;
+        }
         let incoming = audio.ancillary_metadata(&spec, |message| {
             losses.report(None, None, "container_metadata", message)
         })?;
@@ -1533,17 +1586,25 @@ impl AudioSource {
             return Ok(None);
         }
         let mut metadata = ContainerMetadata::new(container, chunks)?;
-        metadata.origin = Some(crate::ancillary::Origin {
+        metadata.origin = Some(self.metadata_origin(spec, frames, is_s24));
+        Ok(Some(metadata))
+    }
+    fn metadata_origin(
+        &self,
+        spec: &MasterSpec,
+        frames: u64,
+        unchanged: bool,
+    ) -> crate::ancillary::Origin {
+        crate::ancillary::Origin {
             frames,
             channels: self.source_channels,
             sample_rate: spec.sample_rate,
             start_sample: spec.start_sample,
             object_tracks: spec.objects.iter().map(|o| o.id).collect(),
-            unchanged: is_s24
+            unchanged: unchanged
                 && self.map.len() == self.source_channels
                 && self.map.iter().enumerate().all(|(i, c)| *c == Some(i)),
-        });
-        Ok(Some(metadata))
+        }
     }
     pub(crate) fn with_origin(mut self, path: &Path) -> Self {
         self.origin = path.canonicalize().ok();

@@ -159,7 +159,7 @@ fn dbmd_bytes_match_verified_static_fields_and_validate_container_integrity() {
     spec.surround_phase_shift = true;
     spec.bed_distribution = true;
     spec.warp_mode = WarpMode::Warping;
-    spec.trim_mode = [None; 4];
+    spec.trim_mode = [None; 9];
     spec.trim_mode[TrimConfiguration::SomeSurroundsNoHeights.index()] = Some(TrimValues {
         center: -3.,
         surround: 0.25,
@@ -372,7 +372,7 @@ fn standard_does_not_silently_normalize_unspecified_presentation_settings() {
         Some("bed_distribution")
     );
     spec.set_bed_distribution(Some(false));
-    spec.trim_mode = [None; 4];
+    spec.trim_mode = [None; 9];
     assert_eq!(
         MasterWriter::create(dir.path("trim.wav"), spec.clone())
             .unwrap_err()
@@ -431,7 +431,7 @@ fn dbmd_and_presentation_fields_survive_logic_damf_logic_without_external_overri
     original.surround_phase_shift = true;
     original.bed_distribution = true;
     original.warp_mode = WarpMode::ProLogicIIx;
-    original.trim_mode = [None; 4];
+    original.trim_mode = [None; 9];
     original.trim_mode[1] = Some(TrimValues {
         center: -3.,
         front_back_listener: 1.,
@@ -793,12 +793,14 @@ fn independent_adm_names_are_retained_without_changing_references() {
         let mut original = spec(profile);
         original.objects[0].pack_name = Some("Voice pack".into());
         original.objects[0].channel_names = ChannelNames {
+            stream_pack_ref: false,
             extensions: Default::default(),
             channel: Some("对象<&>".into()),
             stream: Some("Voice stream".into()),
             track: Some("Voice track".into()),
         };
         original.bed_channel_names[0] = ChannelNames {
+            stream_pack_ref: false,
             extensions: Default::default(),
             channel: Some("Front left".into()),
             stream: Some("L stream".into()),
@@ -1011,7 +1013,7 @@ fn unsupported_attributes_extensions_and_container_chunks_are_reported() {
 
 #[cfg(feature = "read")]
 #[test]
-fn unknown_dbmd_segments_can_be_dropped_but_known_values_are_retained() {
+fn native_dbmd_segments_survive_logic_and_unrepresentable_targets_report_losses() {
     use macin_atmos::adm::AdmReader;
     let dir = Temp::new();
     let mut spec = spec(Profile::Logic);
@@ -1033,18 +1035,34 @@ fn unknown_dbmd_segments_can_be_dropped_but_known_values_are_retained() {
         &extra,
     )
     .unwrap();
+    let reader = AdmReader::open(&target, LossPolicy::Reject).unwrap();
+    assert_eq!(reader.spec().frame_rate, FrameRate::Fps25);
+    assert!(reader.diagnostics().is_empty());
+    let native = Target {
+        profile: Profile::Logic,
+        path: dir.path("native.wav"),
+    };
+    reader
+        .convert(reader.audio().unwrap(), std::slice::from_ref(&native))
+        .unwrap();
+    assert_eq!(payload(&chunk(&native.path, *b"dbmd"), 42), [1, 2, 3]);
+    let home = Target {
+        profile: Profile::DamfHome,
+        path: dir.path("home"),
+    };
     assert_eq!(
-        AdmReader::open(&target, LossPolicy::Reject)
+        reader
+            .convert(reader.audio().unwrap(), std::slice::from_ref(&home))
             .unwrap_err()
             .field,
         Some("dbmd_encoding")
     );
     let reader = AdmReader::open(target, LossPolicy::Allow).unwrap();
-    assert_eq!(reader.spec().frame_rate, FrameRate::Fps25);
-    assert_eq!(reader.diagnostics()[0].field, "dbmd_encoding");
+    let report = reader.convert(reader.audio().unwrap(), &[home]).unwrap();
+    assert_eq!(report.outputs[0].diagnostics[0].field, "dbmd_encoding");
 
     let mut version = original;
-    version[0] = 7;
+    version[0] = 9;
     let target = dir.path("version.wav");
     macin_bwf::replace_chunk(
         fs::File::open(&source).unwrap(),
@@ -1162,3 +1180,6 @@ fn caf_metadata_before_and_after_audio_requires_explicit_loss_permission() {
         );
     }
 }
+
+#[path = "mapping/dbmd.rs"]
+mod dbmd_reference;

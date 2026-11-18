@@ -99,14 +99,12 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
 - Logic/DAMF 保存 `sc_bed_configuration`、`downmix_mode`、`surround_phase_shift`、`bed_distribution`、
   `warp_mode` 与 `trim_mode`。配置码为 0..=8 的不重复集合；模型空集合表示 DBMD 未指定，可在 Logic 保留。
   DAMF 输入缺省或空列表解释为 `[3]`，不能表达该未指定状态；写 DAMF 时 Reject 拒绝，Allow 诊断并采用 `[3]`。
-  下混为 LoRo_Stereo / LtRt_ProLogic / LtRt_PLII；warp 为 LoRo / ProLogicIIx / warping / normal。
-  `WarpMode::None` 保留为 Normal 的 API 别名，旧输入 `None` 也归一化为 normal。
-- `bed_distribution_present` 区分未指定和显式 false/true，默认显式 false；未指定时数值必须为 false。
-  可用 `set_bed_distribution(Option<bool>)` 同时设置两者。未指定在 DAMF 中省略，在 DBMD 中保留未指定状态。
-- `trim_mode` 按 `TrimConfiguration::ALL` 对应四组配置。None 表示自动，Some(default) 表示空的手动配置；
-  默认四组均为 Some(default)，读取时缺省的配置为 None。三项 trim 为有限且可存为有限 f32 的数值，
-  两项 front/back balance 限于 -1..=1。Logic 使用原生 f32 精度，并将 balance 乘 127 后就近取整
-  （中点远离零）；这是已声明的存储精度。DAMF 按文本数值精度写出。
+  下混支持 `LoRo_Stereo`、`LtRt_ProLogic`、`LtRt_PLII` 和 `directRender`。warp 支持 LoRo、ProLogicIIx、warping、normal。`WarpMode::None` 保留为 Normal 的别名。
+- DAMF 省略 warp、下混或 90° 相移时分别对应 DBMD 码 4、0、3。前两项在模型中为 `NotIndicated`，相移可用 `set_surround_phase_shift(Option<bool>)` 设置。未指定在 DAMF 中省略，各项显式值分别写出。新建母版沿用 LoRo、LoRo 和显式关闭的默认设置。
+- `first_action_ns` 是独立于节目起点的首个动作帧（FFOA），以有符号整数纳秒表示。DAMF 的 `ffoa` 使用秒，省略表示未指定，显式零保留。Logic 用时、分与十万分之一秒保存，就近量化到 10 µs。小时字节的高位表示未指定，新建时写 0xff。超出可用时钟的值或写往 Standard 时按 `ffoa` 拒绝或诊断后省略。
+- `bed_distribution_present` 区分未指定和显式 false/true，默认显式 false。用 `set_bed_distribution(Option<bool>)` 设置两者。未指定在 DAMF 中省略，在 DBMD 中保存原生状态。
+- `trim_mode` 按 `TrimConfiguration::ALL` 提供九个槽位。原四个索引不变，对应 5.1、5.1.2、5.1.4、7.1。新增的五个依次对应 2.0、2.1.2、7.1.2、2.1.4、7.1.4。新建母版前四个为显式空手动配置，其余自动。DAMF 省略的槽位为自动。三项增益使用有限 f32。两项前后平衡范围为 −1 到 1，DBMD 低七位取绝对值乘 127 后就近取整，高位 0 为负、1 为正。两个零码都能读入，新建零值写 0x80，同格式保留源零码。
+- DBMD 声道 `trimBypass` 码 2 在对象和 bed 上通过 `trim_bypass_unspecified` 保留。显式布尔更新清除该状态。转向仅有布尔设置的 DAMF 或通用 ADM 时，按 `trim_bypass` / `bed_trim_bypass` 拒绝或诊断后采用 false。
 - Standard 不承载非默认的上述 DBMD 节目级设置，按字段报告损失；未指定的 bedDistribution 和自动 trim
   与该配置默认的显式 false / 空手动设置不同，同样报告损失。screen_size_ratio 在两种 ADM 输出中均没有映射。
   三项静态通道字段、区域预设与节目级字段的外部验证见[验证记录](VALIDATION.md)。
@@ -176,6 +174,7 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
 - **WAV 作音频**：`wave_audio` 用 WAV 代替 `.atmos.audio`，第 n 个声道对应 DAMF ID n，采样率必须与元数据一致。
   16/24-bit PCM 精确转换；32-bit PCM 和浮点按已声明的格式行为量化到 24 bit，超出 ±1 的浮点样本报错。
 - **读取损失**包括未知键（`unknown_field`）、没有连续属性却有非零 ramp 的事件（`ramp` / `bed_ramp`）、对象缺少采样 0 初始状态（`initial_state`）、simplified=true，以及未识别的 trim 配置或参数（`trim_mode`）。无初始事件的 bed 使用该声道的默认值。
+- 同名 `.atmos.dbmd` 是可选的 YAML 编码参数文件。`ddplus.compr1` 和 `ddplus.dynrng1` 分别映射 DD+ 第 7 段节目 0 的 RF 与 Line 压缩配置。六种可移植取值为 none、film_standard、film_light、music_standard、music_light、speech。非默认值从 Logic 转 DAMF 时生成伴随文件。原音频和布局匹配、压缩设置不变时，同格式保留原文及未映射键。无法沿用原文时按 `dbmd_sidecar` 处理，允许损失仍保留可映射的压缩设置。
 - **容器元数据**：扫描 CAF 的 data 前后附加块；info 按[容器保留规则](#原生-adm-元数据与容器保留)处理，
   其余非 desc/data/free 块按 `container_metadata` 处理。只读取受支持且预算内的载荷，坏长度或重复 data 直接拒绝。
 - **直接拒绝**：多个 presentation、多个 bed、不是完整 7.1.2 的 bed、0.5/0.6 以外的 DAMF 版本、
@@ -207,13 +206,13 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
   显式替换 WAV 仍按替换长度输出，并保留来源节目、对象和 bed 的有限停用边界。缩短替换音频时 bed 时长截到输出范围，后续事件仍须有对应音频。
 - **头锁与区域**：对象级 headLocked 为 block 的缺省值，block 可以覆盖；缺省的 block 不继承前一个 block 的覆盖。
   名称、边界和完整组合都匹配时，区域使用已验证预设（含 ZB/ZT elevation）。其他完整的自定义区域按原值保存。省略 zoneExclusion 时恢复 All / elevation=true 并清除自定义列表。
-- **DBMD**：按来源声道号恢复静态通道参数，再按输出声道重排。XML 头锁与 DBMD 冲突时 Reject 报错，
-  Allow 采用 DBMD 并诊断。未知版本（`dbmd`）、编码设置或 segment（`dbmd_encoding`）、未识别的帧率、
-  布局位、trim 配置或通道模式按相应字段报告；Allow 可以保留已识别部分。坏校验和、重复 segment、
-  无效长度或声道数不匹配属于无效输入，Allow 也拒绝。
+- **DBMD** 按源声道号读取静态通道参数，与音频一起重排。XML 头锁冲突时 Reject 报错，Allow 采用 DBMD 并诊断。已验证的 1.0.0.5 至 1.0.0.8 段布局可读，Logic 保留来源版本，新建块使用 1.0.0.6。帧率取第 9 段帧率字节的低四位，原高位在 Logic 中保留。未知版本报 `dbmd`，未知帧率、头追、双耳、warp、下混或非法相移按相应字段报告。
+- `dbmd_source` 保存原生段顺序。Logic 保留 EBU 的 Dolby E（1）、Dolby Digital（3）、DD+（7）、Audio Info（8）、其他不透明载荷和保留字节。多个节目的同类段可重复。第 1、9、10 段各自只允许一个。可在结束标记后放一个对齐字节，长度码 0 表示 65,535 字节，校验使用线上的长度低字节。坏校验、截断和非法长度直接拒绝。第 10 段可带扩展尾部，声道计数须等于输入声道数或为零。
+- 仅在原音频、声道顺序、采样率、节目起点与时长匹配时透传与布局关联的不透明编码数据。目标无法保存原生载荷时，Reject 拒绝，Allow 记录 `dbmd_encoding` 并写出可映射值。已建模的压缩配置、逐声道参数及自动/手动 trim 由模型更新。DBMD 及旧 DAMF 伴随文件各限 1 MiB。
 - **ID 与声道**：对象按轨道号排序，`TrackId` 是对象在文件里的轨道号（从 1 起）；`wave_audio` 用 WAV 代替音频时，
   第 n 个声道对应第 n + 1 条轨道。没有 bed 的文件写出一组静音 bed。
 - **读取阶段的损失**包括未映射元素和属性（`unknown_field`）、不完整或包含未识别字段的区域（`zone`）、对象位置的 bound（`position_bound`）、多个或嵌套 pack 引用（`pack_structure`）。可解析的完整原生字段留到目标写出时判断。附加块遵循前述容器规则。
+- stream 可显式引用该轨道所属的 pack。ADM 写出时将该引用绑定到新生成的 pack ID。重复、悬空或冲突的引用按 `pack_structure` 处理。
 - **轨道扩展属性**保存在 `ChannelNames::extensions` 的 stream、track、uid 中。ADM 输出在原所属元素写出前缀、命名空间 URI、局部名和值，并声明值中使用的已知命名空间前缀。换行、制表符按 XML 字符引用转义。值里的供应商私有标识符和相对路径作为不透明文本保存。写 DAMF 遇到这些属性时报告 `track_extensions`。
 - **直接拒绝**：多个 programme、多个 bed、不完整或非 7.1.2 的 bed、极坐标对象、多声道 `Objects`、嵌套对象、
   HOA 等其他 `typeDefinition`、对象 block 之间有空隙或重叠，以及没有 `axml` / `chna` 的文件。

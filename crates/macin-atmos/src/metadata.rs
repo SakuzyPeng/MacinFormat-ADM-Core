@@ -115,6 +115,42 @@ pub(crate) fn sample_seconds(samples: u64, rate: u32) -> Result<String> {
     }
 }
 
+#[cfg(feature = "read")]
+pub(crate) fn parse_action_seconds(text: &str) -> Result<i64> {
+    let invalid = || Error::invalid("Invalid or out-of-range FFOA in seconds");
+    let negative = text.starts_with('-');
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if (!whole.is_empty() || !fraction.is_empty())
+        && whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|b| b.is_ascii_digit())
+    {
+        let seconds = if whole.is_empty() {
+            0
+        } else {
+            whole.parse::<i128>().map_err(|_| invalid())?
+        };
+        let mut ns = 0i128;
+        for i in 0..9 {
+            ns = 10 * ns + i128::from(fraction.as_bytes().get(i).copied().unwrap_or(b'0') - b'0');
+        }
+        ns += i128::from(fraction.as_bytes().get(9).is_some_and(|&x| x >= b'5'));
+        let absolute = seconds
+            .checked_mul(1_000_000_000)
+            .and_then(|s| s.checked_add(ns))
+            .ok_or_else(invalid)?;
+        return i64::try_from(if negative { -absolute } else { absolute }).map_err(|_| invalid());
+    }
+    let ns = (text.parse::<f64>().map_err(|_| invalid())? * 1e9).round();
+    let min = i64::MIN as f64;
+    if !(min..-min).contains(&ns) {
+        return Err(invalid());
+    }
+    Ok(ns as i64)
+}
+
 pub(crate) fn trim_fields(values: TrimValues) -> [(&'static str, f64); 5] {
     [
         ("centerTrim", values.center),
@@ -834,6 +870,7 @@ pub fn write_axml_with_beds(
         .map(|(i, b)| {
             (
                 bed_channel(i),
+                "AP_00011001".to_owned(),
                 spec.bed_channel_names[i].channel.as_deref().unwrap_or(b.0),
                 &spec.bed_channel_names[i],
             )
@@ -841,11 +878,12 @@ pub fn write_axml_with_beds(
         .chain(spec.objects.iter().enumerate().map(|(i, o)| {
             (
                 object_channel(i),
+                object_pack(i),
                 o.channel_names.channel.as_deref().unwrap_or(&o.name),
                 &o.channel_names,
             )
         }));
-    for (id, name, names) in channels {
+    for (id, pack, name, names) in channels {
         let stream = id.replacen("AC_", "AS_", 1);
         let track = format!("{}_01", id.replacen("AC_", "AT_", 1));
         let pcm = format!("PCM_{name}");
@@ -863,6 +901,9 @@ pub fn write_axml_with_beds(
             &names.extensions.stream,
         )?;
         xml.element("audioChannelFormatIDRef", &[], &id)?;
+        if names.stream_pack_ref {
+            xml.element("audioPackFormatIDRef", &[], &pack)?;
+        }
         xml.element("audioTrackFormatIDRef", &[], &track)?;
         xml.end("audioStreamFormat")?;
         xml.start_extended(
@@ -1016,14 +1057,33 @@ pub fn damf_manifest(spec: &MasterSpec) -> Result<String> {
             "    creationToolVersion: {}",
             yaml_plain_or_quote(&spec.creation_tool_version)
         ),
-        format!("    downmixType_5to2: {}", spec.downmix_mode.as_str()),
-        format!(
+    ];
+    if let Some(ns) = spec.first_action_ns {
+        let sign = if ns < 0 { "-" } else { "" };
+        lines.push(format!(
+            "    ffoa: {sign}{}",
+            sample_seconds(ns.unsigned_abs(), 1_000_000_000)?
+        ));
+    }
+    if spec.downmix_mode != DownmixMode::NotIndicated {
+        lines.push(format!(
+            "    downmixType_5to2: {}",
+            spec.downmix_mode.as_str()
+        ));
+    }
+    if spec.surround_phase_shift_present {
+        lines.push(format!(
             "    51-to-20_LsRs90degPhaseShift: {}",
             spec.surround_phase_shift
-        ),
-        format!("    warpMode: {}", spec.warp_mode.as_str()),
-        format!("    screenSizeRatio: {}", number(spec.screen_size_ratio, 9)),
-    ];
+        ));
+    }
+    if spec.warp_mode != WarpMode::NotIndicated {
+        lines.push(format!("    warpMode: {}", spec.warp_mode.as_str()));
+    }
+    lines.push(format!(
+        "    screenSizeRatio: {}",
+        number(spec.screen_size_ratio, 9)
+    ));
     if spec.bed_distribution_present {
         lines.push(format!("    bedDistribution: {}", spec.bed_distribution));
     }
@@ -1142,6 +1202,12 @@ pub fn binaural_name(mode: BinauralMode) -> &'static str {
 /// only discrete properties change. The caller has already checked the selected backend's losses.
 pub fn damf_event(id: u32, sample: u64, patch: ObjectPatch, ramp: Option<u64>) -> Result<String> {
     patch.apply(ObjectState::default()).validate()?;
+    if patch.trim_bypass_unspecified {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "DAMF cannot encode an unspecified DBMD trim bypass",
+        ));
+    }
     use std::fmt::Write;
     let mut out = format!("  - ID: {id}\n    samplePos: {sample}\n");
     macro_rules! field {

@@ -271,7 +271,7 @@ film/master.atmos (home): 2 objects, 3 updates
 | --- | --- | --- |
 | `Standard`（默认） | BW64 ADM BWF | 通用的 ADM 工具链，例如 EBU EAR |
 | `Logic` | RF64 ADM BWF，带 DBMD | 导入 Logic Pro，或交给只认 RIFF/RF64 的 Dolby 工具 |
-| `DamfHome` | DAMF 0.5.1 三件套（`.atmos`、`.atmos.metadata`、`.atmos.audio`） | Dolby Atmos Renderer 与 Conversion Tool |
+| `DamfHome` | DAMF 0.5.1（`.atmos`、`.atmos.metadata`、`.atmos.audio`），可附 `.atmos.dbmd` | Dolby Atmos Renderer 与 Conversion Tool |
 | `DamfThreeDof` | DAMF 0.6.0 / 3dof | 需要 3DoF DAMF 的较新 Dolby 工具 |
 
 不确定选哪个时，用 `MultiWriter` 或 `mfadm convert --to … --to …` 一次写出几份，PCM 只量化一次、各份音频完全相同。

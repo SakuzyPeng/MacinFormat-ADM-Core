@@ -285,7 +285,7 @@ budget, exit codes and the remaining options are in the [mfadm reference](docs/R
 | --- | --- | --- |
 | `Standard` (default) | BW64 ADM BWF | General ADM tool chains such as EBU EAR |
 | `Logic` | RF64 ADM BWF with DBMD | Importing into Logic Pro, or Dolby tools that only accept RIFF/RF64 |
-| `DamfHome` | DAMF 0.5.1 (`.atmos`, `.atmos.metadata`, `.atmos.audio`) | Dolby Atmos Renderer and the Conversion Tool |
+| `DamfHome` | DAMF 0.5.1 (`.atmos`, `.atmos.metadata`, `.atmos.audio`) with optional `.atmos.dbmd` | Dolby Atmos Renderer and the Conversion Tool |
 | `DamfThreeDof` | DAMF 0.6.0 / 3dof | Newer Dolby tools that take 3DoF DAMF |
 
 When unsure, write several in one pass with `MultiWriter` or `mfadm convert --to … --to …`: the PCM is quantised

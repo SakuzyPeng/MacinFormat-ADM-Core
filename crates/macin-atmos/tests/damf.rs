@@ -616,7 +616,7 @@ fn an_objects_only_master_gets_a_silent_bed() {
     assert_eq!(channel_values(&out), expected);
     let copied = macin_atmos::adm::AdmReader::open(out, LossPolicy::Reject).unwrap();
     assert!(!copied.spec().bed_distribution_present);
-    assert_eq!(copied.spec().trim_mode, [None; 4]);
+    assert_eq!(copied.spec().trim_mode, [None; 9]);
 }
 
 fn open_with(metadata: &str, policy: LossPolicy) -> Result<DamfReader> {

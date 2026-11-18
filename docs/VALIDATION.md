@@ -286,7 +286,7 @@ SHA-256 分别为 `16695cc0b97a3e9e5127bcb3a5a09f47f8acfe4ec09298c402252a84c2c08
 新高层入口区分这三种状态，旧低层入口保留其兼容契约。
 布局码 0..7 对应偏移 135 的八个位，码 8 对应偏移 136 的 bit 2。全零 DBMD 掩码会导出缺省配置的 DAMF，
 但工具再读缺省 DAMF 时采用 `[3]`，不能当作可逆映射：库保留未指定的原生状态，跨到 DAMF 时按损失处理。
-四个 trim 槽位与正负平衡值也经过独立对照，平衡量化符合声明的 1/127 存储精度。
+四个 trim 槽位及所测平衡值符合 1/127 的量化步长。此处的负值对照取了 −0.5，两套算法恰好都写出 `0x40`。负值端点的读写差异见[后续 DBMD 复核](#dbmd-解析器与-ebu-规范对照)。
 
 自动检查：fmt、workspace 与独立只写配置的 Clippy（`-D warnings`）通过；workspace 146 项测试通过，
 1 项历史真实 4 GiB 测试保持 ignored；独立 `macin-atmos` 29 项、Python 13 项测试通过。
@@ -391,3 +391,52 @@ CLI 的 SHA-256 为 `597ab41772ba97b403374891b2c8a418a72600395d64bccb1affbff27f3
 对三组不同的 DBMD 码位排列，把同一载荷放入 PCM 和声道布局一致的合成 Logic 容器，分别用 mfadm 默认严格模式读回再写两次。普通 bed 和对象的 3、4，以及对照 LFE 原始码均逐字节保留，PCM 一致，无映射诊断。这个对照隔离了 AXML 结构，直接读 Dolby 工具生成的参考 AXML 还有独立的 stream→pack 引用限制。测试观测文件元数据，渲染默认值的依据见[Logic Pro 用户指南](https://support.apple.com/zh-cn/guide/logicpro/lgcp789f000d/mac)和[Dolby Renderer 指南](https://professional.dolby.com/siteassets/content-creation/dolby-atmos/dolby_atmos_renderer_guide.pdf)。
 
 共 9 个场景、19 次 Dolby 转换和 6 次 mfadm 转换。自动回归另测了保留码 5 的拒绝与诊断，以及显式 Mid 转便携 DAMF 时显式标记的损失。仓库六项检查通过，工作区 171 项通过、1 项真实 4 GiB 测试保持 ignored，独立只写配置 34 项、Python 13 项通过。最终 mfadm SHA-256 为 `d16f4aa4921d875b3c92889e88dd883258e695ca03ace29d6c32b8dad0044d2d`。对照脚本和结果存于 `artifacts/audits/2026-11-17-binaural-mid/`，合成媒体已清理。
+
+## DBMD 解析器与 EBU 规范对照
+
+2026-11-17 在 macOS 27.2.1 arm64 实测 `d42ea3c`。使用 Rust 1.98.0、Dolby Atmos DBMD Parser 1.1（公开分叉 `ba90621`，本机编译）、Dolby Atmos Conversion Tool `2.1.2_07765940` 和 MediaInfoLib 26.01。EBU Tech 3285 Supplement 6 对应 DBMD 1.0.0.6，其中第 2、3 节定义块和段，第 4 节定义 Dolby E、DD、DD+ 和 Audio Info。Dolby ADM Profile 说明 Atmos 母版中该块的用途，C 解析器另给出第 9、10 段的部分字段。[EBU 规范](https://tech.ebu.ch/files/live/sites/tech/files/shared/tech/tech3285s6.pdf) · [Dolby ADM Profile 第 4 节](https://developer.dolby.com/globalassets/documentation/technology/dolby_atmos_master_adm_profile_v1.0.pdf#page=19) · [C 解析器](https://github.com/rsjbailey/dbmd-atmos-parser/blob/ba906211938bdb30b7852e657cd1939f7e07903c/dbmd_atmos_parse/src/dbmd_atmos_parse.c)
+
+解析器附带的七份 WAV 都是 48 kHz、两路对象、240,000 帧。C 解析器读通全部七份，Conversion Tool 各转 WAV 和 DAMF 都成功，WAV 的 PCM 与原文件一致。七份文件的帧率字节都是 `0x12`，MediaInfo 与 Conversion Tool 均读成 24 fps。`mfadm convert` 默认逐份报 `frame_rate` 并停止。允许损失后七份均写出，并报告下混、其他 DBMD 编码参数，以及独立的 AXML stream→pack 引用损失。输出另增十路静音 bed。[公开样本及预期输出](https://github.com/rsjbailey/dbmd-atmos-parser/tree/ba906211938bdb30b7852e657cd1939f7e07903c/sample_files)
+
+另对本库 12 声道、96,000 帧的夹具逐项修改 DBMD 并重算段校验和。70 组合成输入各经严格与允许损失模式转 Logic。36 组严格成功，23 组只在允许损失时成功，11 组两种策略均拒绝。所有成功输出的 PCM 均与合成输入一致。另用相同 PCM 的 Dolby 母版和静态 DAMF 对照字段原码、清单值与转换方向。
+
+| 字段 | 观测到的差异 |
+| --- | --- |
+| 手动 trim 的两个前后平衡值 | Dolby 将 `0x01` 和 `0x7F` 分别读作 −1/127 和 −1。本库严格转 DAMF 分别写出 −1 和约 −1/127，全程无损失诊断。反向输入 −1，Dolby 写 `0x7F`，本库写 `0x01`。输入 −0.25 分别写 `0x20` 和 `0x60`。两端都用本库做 Logic→Logic 时这些原码均能复原。Dolby 将 `0x00` 读作零并重新写成 `0x80`，本库两种策略均拒绝。MediaInfo 26.01 对方向的显示与 Conversion Tool 相反。 |
+| 帧率与首个动作帧（FFOA） | 除公开样本的 `0x12` 外，合成 `0x13` 被 Dolby 读成 25 fps，本库允许损失时输出 24 fps。FFOA 设为 0.5 秒、节目 offset 保持 0 时，Dolby 的 DAMF 同时保留两值。本库严格读 DBMD 报 `dbmd_encoding`，允许损失后 FFOA 变为未指定。直接读含 `ffoa` 的 DAMF 报 `unknown_field`。 |
+| Warp、5.1→2.0 下混与 90° 相移 | Warp 码 4 在 C 头文件中为未指定，公开样本 0 也用了该码。允许损失后本库写成 0（normal）。下混码 0 为未指定，4 对应 Dolby DAMF 的 `directRender`。本库从 DBMD 允许损失后两者均写为 1（LoRo），直接读 `directRender` 的 DAMF 在两种策略下均拒绝。相移码 3 在 Dolby 中保持未指定，本库允许损失后写为 1（开启）。相移码 2 在 Conversion Tool 中引发错误日志，工具仍生成按未指定处理的输出。 |
+| DAMF 省略上述设置 | 从静态 DAMF 分别省略三个键，经 Dolby 写入的 warp、下混、相移码分别为 4、0、3。本库在严格模式下分别写为 3（LoRo）、1（LoRo）、0（关闭），三次均无损失诊断。 |
+| 九种 trim 布局 | 在九个槽位分别写入手动 trim，C 解析器均识别为手动，Dolby 均能转出有数值的 DAMF 并在 WAV 中保留手动模式。本库保留 5.1、7.1、5.1.2、5.1.4，另外五种为 2.0、2.1.2、7.1.2、2.1.4、7.1.4。对这五种，本库严格报 `trim_mode`，允许损失后写成自动。 |
+| 声道设置 | 双耳模式 0 至 4、三种已支持的头追和布尔 trimBypass 均能在本库严格往返。对于 trimBypass 码 2，MediaInfo 的码表标作未指定，C 解析器跳过该字段，Conversion Tool 能读入并写成 0，本库两种策略均拒绝。 |
+| DBMD 版本 | 在带 Near 声道值的 1.0.0.6 布局上只改版本号。C 解析器接受 1.0.0.5 和 1.0.0.7，拒绝 1.0.0.8。Conversion Tool 对这三个变体都读取了 Near 并写回 1.0.0.6。本库只认 1.0.0.6，三个变体均在严格模式下报 `dbmd`，允许损失后整块按默认值重建，Near 也丢失。 |
+
+EBU 第 4.3 节给出第 7 段的 DD+ 字段表，并要求原样传递该段的保留字节。生成代码把第 7、9、10 段一并注为私有负载，对第 7 段的描述有误。本库重建固定的 96 字节模板，单改 dialnorm 或保留字节均触发 `dbmd_encoding`，允许损失后恢复模板。单独加入第 1、3、8 段也触发同类损失。多节目 Dolby E 带两个不同 programme ID 的第 3 段，因段号重复被直接拒绝。EBU 允许单个对齐字节取任意值，也规定长度码零代表 65,535 字节。本库把非零对齐判为尾部数据，把零长度码按空载荷检查。[EBU 表 2、表 3 及第 4 节](https://tech.ebu.ch/files/live/sites/tech/files/shared/tech/tech3285s6.pdf#page=7)
+
+36 组严格成功的合成输入中，28 组 DBMD 逐字节一致。其余八组包括按既有约定重写创建工具名与版本、重置第 9 段偏移 99–110 的未建模数据、归一化 bedDistribution 的另一种未指定编码、清零自动 trim 的闲置字节、归一化多余的零填充，以及分别补上缺省的第 7、9、10 段。前后平衡值的语义错误发生在原码可复原的组里。
+
+C 解析器还能跳过第 10 段的额外尾部，并只取自动 trim 标志的低一位。本库在两个策略下都拒绝本次额外尾部、高位标志、自动槽中形似 NaN 的闲置字节，以及段内计数与 PCM 声道数不符的输入。C 工具用于查看部分元数据，这几项只记作读取范围差异。[C 解析器说明](https://github.com/rsjbailey/dbmd-atmos-parser/blob/ba906211938bdb30b7852e657cd1939f7e07903c/README.md) · [MediaInfo 26.01 的段字段解析](https://github.com/MediaArea/MediaInfoLib/blob/v26.01/Source/MediaInfo/Audio/File_DolbyAudioMetadata.cpp#L245)
+
+另查旧版 Renderer 指南，它列出可携带下游编码参数的独立 `.atmos.dbmd` 文件。当前 DAMF 读取器按清单打开音频和事件元数据，未实现这个伴随文件的读取。这项依据是指南和读取器源码，本次媒体实测对象是 WAVE 内嵌的 DBMD。[Dolby Renderer 3.0 指南，第 144 页](https://professional.dolby.com/siteassets/content-creation/dolby-atmos/dolby_atmos_renderer_guide.pdf#page=144)
+
+仓库六项检查通过。workspace 测试 171 项通过，1 项真实 4 GiB 测试保持 ignored。独立只写配置 34 项、Python 13 项通过。本地对照脚本与逐项结果位于 `artifacts/audits/2026-11-17-dbmd-reference/`。
+
+## DBMD 修正后的原码与跨格式复测
+
+2026-11-17 在 macOS 27.2.1 arm64 实测。代码基线为 `d42ea3c` 加本次修正，使用 Rust 1.98.0、Python 3.13.2、Dolby Atmos Conversion Tool `2.1.2_07765940`、DBMD Parser 1.1（`ba90621`）和 MediaInfoLib 26.01。
+
+七份公开 WAV 均在默认严格模式下转成 Logic，再严格写一次。14 次转换的读写诊断均为空。逐样本核对每份输出的两路对象 PCM，原样保留，新增的十路 bed 全为静音。另核对原第 7 段、原第 9 段偏移 99 之后的字节、第 10 段的九组 trim 和两路对象各自的设置。七份首次输出均由 C 解析器读通，第二次输出的 DBMD 和 PCM 与首次输出逐字节一致。[公开样本](https://github.com/rsjbailey/dbmd-atmos-parser/tree/ba906211938bdb30b7852e657cd1939f7e07903c/sample_files)
+
+用前节相同的 70 组合成输入复测 Logic→Logic。严格模式通过 66 组，其中 65 组 DBMD 原码完全一致。另外一组按约定写入本库的创建工具名与版本。全部成功输出均核对了 PCM。余下四组的结果如下。
+
+| 输入 | 严格模式 | 允许损失 |
+| --- | --- | --- |
+| 帧率字节 0x20，没有可用帧率 | 拒绝并指明 `frame_rate`。Conversion Tool 对 0x20 和 0x10 都以 253 退出 | 记录帧率损失，采用 24 fps |
+| 相移码 2 | 拒绝并指明 `ls_rs_phase_shift`。Conversion Tool 产出文件并记录非法相移错误 | 记录损失，写为未指定码 3 |
+| 结束标记后有三个填充字节 | 拒绝异常尾部 | 同样拒绝 |
+| 长度码 0、完整 65,535 字节载荷，但校验初值用了 0xff | 拒绝校验和。以线上长度低字节 0 计算的配对样本完整保留 | 同样拒绝错误校验和 |
+
+九种手动 trim 均可严格保留。用八组 DAMF 前后平衡值分别比较本库和 Dolby 生成的 DBMD，两个平衡字段全部得到相同原码。反向输入 0x01、0x7F 分别得到 −1/127、−1。独立从静态 DAMF 省略 warp、下混或相移得到码 4、0、3，输入 `directRender` 得到下混码 4。节目起点 0 和 FFOA 0.5 秒也在两个方向分别保留。
+
+另以 Conversion Tool 实测同名 YAML 伴随文件。六个压缩配置名依次用在 `compr1` 和 `dynrng1` 上，核对本库与 Dolby 的段 7 原码、PCM，以及本库回写 DAMF 后由 Dolby 再读的结果。同格式保留了原文注释。另加入 `dialnorm` 时，Dolby 警告该键不可由伴随文件修改。本库在同格式保留该键，转 Logic 时严格拒绝，允许损失后仍保留可映射的压缩设置。EBU 段在 Logic 内的保留另覆盖了独立修改 dialnorm、保留字节、不同 programme ID 的重复段和未知扩展段。
+
+六项仓库检查通过。workspace 测试 178 项通过，1 项真实 4 GiB 测试保持 ignored。独立只写配置 37 项、Python 13 项通过。最终 `mfadm` 的 SHA-256 为 `8db10bd307be16c1e026d0697560c082929f6617842ab3f0410daa20ab8b8a49`。对照脚本、逐项结果和检查日志位于 `artifacts/audits/2026-11-17-dbmd-fixes/`。

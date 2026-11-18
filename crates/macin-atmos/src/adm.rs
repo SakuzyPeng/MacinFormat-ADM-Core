@@ -1015,6 +1015,7 @@ impl Scene<'_> {
     }
     fn channel_names(
         &self,
+        object: u32,
         uid: u32,
         default: &str,
         track: Option<TrackId>,
@@ -1028,6 +1029,31 @@ impl Scene<'_> {
         let pcm = format!("PCM_{}", name.as_deref().unwrap_or(default));
         let formats = self.doc.track_format_elements(self.text(uid));
         let uid_node = self.doc.element_by_id(self.text(uid));
+        let mut stream_pack_ref = false;
+        if let Some((_, stream)) = formats {
+            let assigned = self.track_pack(object, uid);
+            for child in self.doc.element_children(stream) {
+                if self.doc.element_name(child) == Some("audioPackFormatIDRef") {
+                    self.attributes(child, &[], track, losses)?;
+                    self.children(child, &[], track, losses)?;
+                    let target = self
+                        .doc
+                        .element_text(child)
+                        .and_then(|id| self.doc.element_by_id(id.trim()));
+                    if !stream_pack_ref && assigned.is_some() && target == assigned {
+                        stream_pack_ref = true;
+                    } else {
+                        losses.report(
+                            track,
+                            None,
+                            "pack_structure",
+                            "Stream pack reference is repeated or differs from its assigned pack"
+                                .into(),
+                        )?;
+                    }
+                }
+            }
+        }
         for (node, attrs, children) in [
             (
                 uid_node,
@@ -1056,7 +1082,11 @@ impl Scene<'_> {
                     "formatLabel",
                     "formatDefinition",
                 ],
-                &["audioChannelFormatIDRef", "audioTrackFormatIDRef"],
+                &[
+                    "audioChannelFormatIDRef",
+                    "audioPackFormatIDRef",
+                    "audioTrackFormatIDRef",
+                ],
             ),
         ] {
             if let Some(node) = node {
@@ -1083,6 +1113,7 @@ impl Scene<'_> {
                 .collect()
         };
         Ok(ChannelNames {
+            stream_pack_ref,
             extensions: TrackExtensions {
                 track: qualified(formats.map(|(t, _)| t)),
                 stream: qualified(formats.map(|(_, s)| s)),
@@ -1263,6 +1294,9 @@ impl AdmReader {
             spec: MasterSpec {
                 sample_rate: rate,
                 profile,
+                downmix_mode: DownmixMode::NotIndicated,
+                warp_mode: WarpMode::NotIndicated,
+                surround_phase_shift_present: false,
                 loss_policy: options.loss_policy,
                 approximate_mappings: options.approximate_mappings,
                 preserve_literal: options.preserve_literal,
@@ -1281,7 +1315,7 @@ impl AdmReader {
             diagnostics: Vec::new(),
             dbmd_channels: None,
         };
-        if let Some(bytes) = wave.metadata(*b"dbmd", 1 << 20)? {
+        if let Some(bytes) = wave.metadata(*b"dbmd", dbmd::DBMD_LIMIT as u64)? {
             let mut losses = Losses {
                 policy: options.loss_policy,
                 diagnostics: &mut diagnostics,
@@ -1296,7 +1330,12 @@ impl AdmReader {
                     }
                     reader.spec.sc_bed_configuration = metadata.sc_bed_configuration;
                     reader.spec.downmix_mode = metadata.downmix_mode;
+                    reader.spec.first_action_ns = metadata.first_action_ns;
+                    reader.spec.ddplus_compression = metadata.ddplus_compression;
+                    reader.spec.dbmd_source = Some(metadata.source);
                     reader.spec.surround_phase_shift = metadata.surround_phase_shift;
+                    reader.spec.surround_phase_shift_present =
+                        metadata.surround_phase_shift_present;
                     reader.spec.bed_distribution = metadata.bed_distribution;
                     reader.spec.bed_distribution_present = metadata.bed_distribution_present;
                     reader.spec.warp_mode = metadata.warp_mode;
@@ -1325,9 +1364,8 @@ impl AdmReader {
                 diagnostics: &mut diagnostics,
             },
         )?;
-        if !ancillary.is_empty() {
-            let mut metadata = ContainerMetadata::new(MetadataContainer::Wave, ancillary)?;
-            metadata.origin = Some(crate::ancillary::Origin {
+        if !ancillary.is_empty() || reader.spec.dbmd_source.is_some() {
+            let origin = crate::ancillary::Origin {
                 frames: info.frames,
                 channels: usize::from(info.format.channels),
                 sample_rate: rate,
@@ -1340,8 +1378,15 @@ impl AdmReader {
                         .iter()
                         .enumerate()
                         .all(|(i, c)| *c == Some(i as u32)),
-            });
-            reader.spec.container_metadata = Some(metadata);
+            };
+            if let Some(source) = &mut reader.spec.dbmd_source {
+                source.origin = Some(origin.clone());
+            }
+            if !ancillary.is_empty() {
+                let mut metadata = ContainerMetadata::new(MetadataContainer::Wave, ancillary)?;
+                metadata.origin = Some(origin);
+                reader.spec.container_metadata = Some(metadata);
+            }
         }
         reader.diagnostics = diagnostics;
         reader.spec.validate()?;
@@ -1650,6 +1695,7 @@ impl AdmReader {
                 return Err(Error::invalid(format!("bed channel {label} appears twice")));
             }
             self.spec.bed_channel_names[slot] = s.channel_names(
+                object.node,
                 track.uid,
                 metadata::default_bed_channel_name(slot),
                 None,
@@ -1691,6 +1737,7 @@ impl AdmReader {
                 head_tracking: Some(first.head_tracking),
                 binaural_mode: private.map(|v| v.binaural_mode),
                 trim_bypass: private.map(|v| v.trim_bypass),
+                trim_bypass_unspecified: private.is_some_and(|v| v.trim_bypass_unspecified),
                 ..Default::default()
             }
             .apply(self.spec.bed[slot]);
@@ -1793,7 +1840,8 @@ impl AdmReader {
             .and_then(|node| s.doc.element_attribute(node, "audioPackFormatName"))
             .filter(|name| *name != spec.name)
             .map(str::to_owned);
-        spec.channel_names = s.channel_names(track.uid, &spec.name, Some(id), losses)?;
+        spec.channel_names =
+            s.channel_names(object.node, track.uid, &spec.name, Some(id), losses)?;
         spec.adm = s.metadata(object.node, crate::native::Level::Object, Some(id), losses)?;
         if let Some(pack) = s.track_pack(object.node, track.uid) {
             spec.pack_adm = s.metadata(pack, crate::native::Level::Pack, Some(id), losses)?;
@@ -1947,6 +1995,20 @@ impl AdmReader {
             }
         }
         if !original_audio || frames != self.frames {
+            if spec.dbmd_source.as_ref().is_some_and(|s| s.extra_encoding) {
+                Losses {
+                    policy: spec.loss_policy,
+                    diagnostics: &mut diagnostics,
+                }
+                .report(
+                    None,
+                    None,
+                    "dbmd_encoding",
+                    "Replacing or trimming audio invalidates the original DBMD encoding data"
+                        .into(),
+                )?;
+                spec.dbmd_source = None;
+            }
             let has_loudness =
                 spec.adm.has_loudness() || spec.contents.iter().any(|c| c.adm.has_loudness());
             if has_loudness {
