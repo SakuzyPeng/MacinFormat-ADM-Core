@@ -6,9 +6,8 @@
 //! [`LossPolicy`]: `Reject` fails with the field named, `Allow` drops it with a
 //! [`MappingDiagnostic`].
 //!
-//! The metadata file is scanned twice and never held in memory. The first pass validates the
-//! whole timeline and folds each object's leading sample-zero events into its initial state; the
-//! second, [`DamfReader::updates`], yields the remaining events in file order.
+//! 元数据从不整体载入；校验时折叠对象和 bed 的 sample-zero 初始事件。
+//! 对象和 bed 更新分别流式扫描，转换在没有 bed 更新时省略该次扫描。
 use crate::yaml::{self, Node};
 use crate::*;
 use macin_bwf::Reader;
@@ -33,7 +32,10 @@ pub struct DamfReader {
     beds: BTreeMap<u32, usize>,
     /// Per object ID, how many leading events were folded into the initial state.
     folded: BTreeMap<u32, usize>,
+    bed_folded: BTreeMap<u32, usize>,
     updates: u64,
+    bed_updates: u64,
+    start_seconds: f64,
     last_sample: Option<u64>,
     creation_tool: Option<String>,
     diagnostics: Vec<MappingDiagnostic>,
@@ -80,6 +82,7 @@ impl Losses<'_> {
             .any(|d| d.track == track && d.field == field && d.message == message)
         {
             self.diagnostics.push(MappingDiagnostic {
+                kind: MappingDiagnosticKind::Loss,
                 track,
                 sample,
                 field,
@@ -208,6 +211,7 @@ impl RawEvent {
                     patch.head_tracking = Some(match value.as_text(key)? {
                         "scene relative" => HeadTracking::SceneRelative,
                         "head relative" => HeadTracking::HeadRelative,
+                        "undefined" => HeadTracking::Undefined,
                         other => {
                             return Err(yaml::invalid(
                                 value.line(),
@@ -259,51 +263,16 @@ impl RawEvent {
     }
 }
 
-/// Fields a bed channel may carry, and the only values the fixed bed can reproduce.
-fn bed_losses(patch: &ObjectPatch, lfe: bool) -> [(&'static str, bool); 16] {
-    let expected_mode = if lfe {
-        BinauralMode::Off
-    } else {
-        BinauralMode::Undefined
-    };
-    [
-        ("bed_active", patch.active == Some(false)),
-        (
-            "bed_gain",
-            patch.gain.is_some_and(|g| g.decibels() != Some(0.)),
-        ),
-        ("bed_importance", patch.importance.is_some_and(|v| v != 1.)),
-        ("bed_trim_bypass", patch.trim_bypass == Some(true)),
-        (
-            "bed_head_tracking",
-            patch
-                .head_tracking
-                .is_some_and(|m| m != HeadTracking::SceneRelative),
-        ),
-        (
-            "bed_binaural_mode",
-            patch.binaural_mode.is_some_and(|m| m != expected_mode),
-        ),
-        ("bed_position", patch.position.is_some()),
-        ("bed_extent", patch.extent.is_some_and(|e| e.is_some())),
-        ("bed_zone", patch.zone.is_some_and(|z| z != Zone::All)),
-        ("bed_snap", patch.snap == Some(true)),
-        ("bed_elevation", patch.elevation == Some(false)),
-        (
-            "bed_decorrelation",
-            patch.decorrelation.is_some_and(|v| v != 0.),
-        ),
-        ("bed_dialog", patch.dialog.is_some_and(|v| v != -1)),
-        ("bed_music", patch.music.is_some_and(|v| v != -1)),
-        (
-            "bed_screen_factor",
-            patch.screen_factor.is_some_and(|v| v != 0.),
-        ),
-        (
-            "bed_depth_factor",
-            patch.depth_factor.is_some_and(|v| v != 0.),
-        ),
-    ]
+fn bed_patch(patch: ObjectPatch) -> BedPatch {
+    BedPatch {
+        rendering: BedRendering::from_patch(patch),
+        active: patch.active,
+        gain: patch.gain,
+        importance: patch.importance,
+        head_tracking: patch.head_tracking,
+        binaural_mode: patch.binaural_mode,
+        trim_bypass: patch.trim_bypass,
+    }
 }
 
 /// Walks `.atmos.metadata`: `sampleRate` and the `events` sequence, one event at a time.
@@ -400,10 +369,10 @@ impl<R: std::io::BufRead + 'static> MetadataScan<R> {
 }
 
 /// Per-object state during the validating pass.
-struct Pass {
-    state: ObjectState,
+struct Pass<T = ObjectState> {
+    state: T,
     /// The state after the folded leading events: the object's initial state.
-    initial: ObjectState,
+    initial: T,
     folding: bool,
     folded: usize,
     last: u64,
@@ -413,6 +382,17 @@ impl DamfReader {
     /// Read and validate a DAMF master from its `.atmos` manifest. `policy` governs both what
     /// reading may drop and, through the spec, what writing may drop.
     pub fn open(manifest: impl AsRef<Path>, policy: LossPolicy) -> Result<Self> {
+        Self::open_with_options(
+            manifest,
+            MappingOptions {
+                loss_policy: policy,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// 选择转换输出允许的近似；DAMF 原生字段读取不需要近似。
+    pub fn open_with_options(manifest: impl AsRef<Path>, options: MappingOptions) -> Result<Self> {
         let manifest = manifest.as_ref();
         let text = File::open(manifest)
             .map_err(Error::from)
@@ -420,13 +400,17 @@ impl DamfReader {
             .map_err(|e| located(manifest, e))?;
         let mut diagnostics = Vec::new();
         let mut reader =
-            Self::from_manifest(manifest, &text, policy, &mut diagnostics).map_err(|e| {
-                if e.track.is_some() {
-                    e
-                } else {
-                    located(manifest, e)
-                }
-            })?;
+            Self::from_manifest(manifest, &text, options.loss_policy, &mut diagnostics).map_err(
+                |e| {
+                    if e.track.is_some() {
+                        e
+                    } else {
+                        located(manifest, e)
+                    }
+                },
+            )?;
+        reader.spec.approximate_mappings = options.approximate_mappings;
+        reader.spec.preserve_literal = options.preserve_literal;
         reader.scan(&mut diagnostics)?;
         reader.diagnostics = diagnostics;
         Ok(reader)
@@ -524,21 +508,8 @@ impl DamfReader {
         {
             spec.stem = stem.to_owned();
         }
-        let fixed: [(&str, &'static str, Differs); 5] = [
-            ("simplified", "simplified", |n| n.as_bool("simplified")),
-            ("offset", "offset", |n| Ok(n.as_f64("offset")? != 0.)),
-            ("scBedConfiguration", "sc_bed_configuration", |n| {
-                Ok(
-                    !matches!(n.as_sequence("scBedConfiguration")?, [v] if v.as_u64("scBedConfiguration")? == 3),
-                )
-            }),
-            ("downmixType_5to2", "downmix_type", |n| {
-                Ok(n.as_text("downmixType_5to2")? != "LoRo_Stereo")
-            }),
-            ("51-to-20_LsRs90degPhaseShift", "ls_rs_phase_shift", |n| {
-                n.as_bool("51-to-20_LsRs90degPhaseShift")
-            }),
-        ];
+        let fixed: [(&str, &'static str, Differs); 1] =
+            [("simplified", "simplified", |n| n.as_bool("simplified"))];
         for (key, field, differs) in fixed {
             if let Some(node) = get(p, key)
                 && differs(node)?
@@ -551,18 +522,79 @@ impl DamfReader {
                 )?;
             }
         }
-        if let Some(node) = get(p, "trimMode") {
-            let custom = node
-                .as_mapping("trimMode")?
+        let start_seconds = get(p, "offset")
+            .map(|n| n.as_f64("offset"))
+            .transpose()?
+            .unwrap_or(0.);
+        if !start_seconds.is_finite() || start_seconds < 0. {
+            return Err(yaml::invalid(line, "offset must be finite and nonnegative"));
+        }
+        if let Some(node) = get(p, "scBedConfiguration") {
+            spec.sc_bed_configuration = node
+                .as_sequence("scBedConfiguration")?
                 .iter()
-                .any(|(_, v)| !matches!(v, Node::Mapping(e, _) if e.is_empty()));
-            if custom {
-                losses.report(
-                    None,
-                    None,
-                    "trim_mode",
-                    "Custom trimMode settings have no mapping".into(),
-                )?;
+                .map(|n| {
+                    u8::try_from(n.as_u64("scBedConfiguration")?)
+                        .map_err(|_| yaml::invalid(n.line(), "Invalid bed configuration"))
+                })
+                .collect::<Result<_>>()?;
+            if spec.sc_bed_configuration.is_empty() {
+                spec.sc_bed_configuration.push(3);
+            }
+        }
+        if let Some(node) = get(p, "downmixType_5to2") {
+            spec.downmix_mode = match node.as_text("downmixType_5to2")? {
+                "LoRo_Stereo" => DownmixMode::LoRo,
+                "LtRt_ProLogic" => DownmixMode::LtRtProLogic,
+                "LtRt_PLII" => DownmixMode::LtRtPlII,
+                other => {
+                    return Err(unsupported(
+                        node.line(),
+                        format!("Unknown downmixType_5to2 {other:?}"),
+                    ));
+                }
+            };
+        }
+        if let Some(node) = get(p, "51-to-20_LsRs90degPhaseShift") {
+            spec.surround_phase_shift = node.as_bool("51-to-20_LsRs90degPhaseShift")?;
+        }
+        spec.trim_mode = [None; 4];
+        if let Some(node) = get(p, "trimMode") {
+            for (name, settings) in node.as_mapping("trimMode")? {
+                let Some(config) = TrimConfiguration::ALL
+                    .into_iter()
+                    .find(|c| c.as_str() == name)
+                else {
+                    losses.report(
+                        None,
+                        None,
+                        "trim_mode",
+                        format!("Unmapped trim configuration {name:?}"),
+                    )?;
+                    continue;
+                };
+                let mut values = TrimValues::default();
+                for (name, value) in settings.as_mapping("trim configuration")? {
+                    let target = match name.as_str() {
+                        "centerTrim" => &mut values.center,
+                        "surroundTrim" => &mut values.surround,
+                        "heightTrim" => &mut values.height,
+                        "frontBackBalanceOverheadFloor" => &mut values.front_back_overhead_floor,
+                        "frontBackBalanceListener" => &mut values.front_back_listener,
+                        _ => {
+                            losses.report(
+                                None,
+                                None,
+                                "trim_mode",
+                                format!("Unknown trim parameter {name:?}"),
+                            )?;
+                            continue;
+                        }
+                    };
+                    *target = value.as_f64(name)?;
+                }
+                values.validate()?;
+                spec.trim_mode[config.index()] = Some(values);
             }
         }
         if let Some(node) = get(p, "fps") {
@@ -583,8 +615,10 @@ impl DamfReader {
         }
         if let Some(node) = get(p, "warpMode") {
             spec.warp_mode = match node.as_text("warpMode")? {
-                "None" => WarpMode::None,
+                "None" | "normal" => WarpMode::Normal,
                 "LoRo" => WarpMode::LoRo,
+                "ProLogicIIx" => WarpMode::ProLogicIIx,
+                "warping" => WarpMode::Warping,
                 other => {
                     return Err(yaml::invalid(
                         node.line(),
@@ -596,9 +630,11 @@ impl DamfReader {
         if let Some(node) = get(p, "screenSizeRatio") {
             spec.screen_size_ratio = node.as_f64("screenSizeRatio")?;
         }
-        if let Some(node) = get(p, "bedDistribution") {
-            spec.bed_distribution = node.as_bool("bedDistribution")?;
-        }
+        spec.set_bed_distribution(
+            get(p, "bedDistribution")
+                .map(|node| node.as_bool("bedDistribution"))
+                .transpose()?,
+        );
         let creation_tool = get(p, "creationTool")
             .map(|n| n.as_text("creationTool").map(str::to_owned))
             .transpose()?;
@@ -713,7 +749,10 @@ impl DamfReader {
             channels,
             beds,
             folded: BTreeMap::new(),
+            bed_folded: BTreeMap::new(),
             updates: 0,
+            bed_updates: 0,
+            start_seconds,
             last_sample: None,
             creation_tool,
             diagnostics: Vec::new(),
@@ -743,7 +782,23 @@ impl DamfReader {
                 )
             })
             .collect();
-        let mut bed_last: BTreeMap<u32, u64> = BTreeMap::new();
+        let mut bed_passes: BTreeMap<u32, Pass<BedState>> = self
+            .beds
+            .iter()
+            .map(|(&id, &slot)| {
+                let state = self.spec.bed[slot];
+                (
+                    id,
+                    Pass {
+                        state,
+                        initial: state,
+                        folding: true,
+                        folded: 0,
+                        last: 0,
+                    },
+                )
+            })
+            .collect();
         let mut scan = open_metadata(&self.metadata)?;
         let path = self.metadata.clone();
         let at = |e: Error| {
@@ -765,18 +820,34 @@ impl DamfReader {
             }
             self.last_sample = self.last_sample.max(Some(event.sample));
             if let Some(&slot) = self.beds.get(&event.id) {
-                let last = bed_last.entry(event.id).or_default();
-                if event.sample < *last {
+                let pass = bed_passes.get_mut(&event.id).unwrap();
+                if event.sample < pass.last {
                     return Err(at(yaml::invalid(
                         event.line,
                         format!("events for ID {} go backwards", event.id),
                     )));
                 }
-                *last = event.sample;
-                for (field, lost) in bed_losses(&event.patch, BED_LABELS[slot] == "LFE") {
-                    if lost {
-                        losses.report(None, Some(event.sample), field, format!("Bed channel {} carries {field} that the fixed bed cannot reproduce", BED_LABELS[slot]))?;
-                    }
+                pass.last = event.sample;
+                let patch = bed_patch(event.patch);
+                if !patch.has_continuous() && event.ramp.is_some_and(|r| r != 0) {
+                    losses.report(
+                        None,
+                        Some(event.sample),
+                        "bed_ramp",
+                        format!(
+                            "Bed channel {} has a ramp without a continuous property",
+                            BED_LABELS[slot]
+                        ),
+                    )?;
+                }
+                pass.state = patch.apply(pass.state);
+                pass.state.validate()?;
+                if pass.folding && event.sample == 0 && event.ramp.unwrap_or(0) == 0 {
+                    pass.initial = pass.state;
+                    pass.folded += 1;
+                } else {
+                    pass.folding = false;
+                    self.bed_updates += 1;
                 }
                 continue;
             }
@@ -827,6 +898,11 @@ impl DamfReader {
             .ok_or_else(|| located(&self.metadata, Error::invalid("metadata has no sampleRate")))?;
         self.spec.sample_rate = u32::try_from(rate)
             .map_err(|_| located(&self.metadata, Error::invalid("sampleRate is too large")))?;
+        let start = self.start_seconds * f64::from(self.spec.sample_rate);
+        if !start.is_finite() || start >= u64::MAX as f64 {
+            return Err(Error::invalid("DAMF offset exceeds the sample clock"));
+        }
+        self.spec.start_sample = start.round() as u64;
         for key in std::mem::take(&mut scan.unknown) {
             losses.report(
                 None,
@@ -847,6 +923,11 @@ impl DamfReader {
             }
             object.initial = pass.initial;
             self.folded.insert(object.id.0 as u32, pass.folded);
+        }
+        for (&id, &slot) in &self.beds {
+            let pass = &bed_passes[&id];
+            self.spec.bed[slot] = pass.initial;
+            self.bed_folded.insert(id, pass.folded);
         }
         self.spec.validate()?;
         Ok(())
@@ -901,6 +982,19 @@ impl DamfReader {
         })
     }
 
+    /// bed 声道更新独立于对象 ID；channel 是 BED_LABELS 的规范位置。
+    pub fn bed_updates(&self) -> Result<BedUpdates> {
+        Ok(BedUpdates {
+            scan: open_metadata(&self.metadata)?,
+            skip: self.bed_folded.clone(),
+            beds: self.beds.clone(),
+        })
+    }
+
+    pub fn bed_update_count(&self) -> u64 {
+        self.bed_updates
+    }
+
     /// The source's own `.atmos.audio`.
     pub fn audio(&self) -> Result<AudioSource> {
         let caf = CafReader::open(&self.audio)?;
@@ -910,6 +1004,7 @@ impl DamfReader {
             "DAMF ID",
             Input::Caf(caf),
         )
+        .map(|audio| audio.with_origin(&self.audio))
     }
     /// A WAV file in place of the source's audio, with channel `n` carrying DAMF ID `n`.
     /// 16- and 24-bit PCM convert exactly; 32-bit PCM and float are quantised to 24 bits, and
@@ -924,23 +1019,60 @@ impl DamfReader {
             "DAMF ID",
             Input::Wave(wave),
         )
+        .map(|audio| audio.with_origin(path))
     }
 
     /// 通过 [`MultiWriter`] 一次写出所有目标，DAMF 目标保留来源的 stem。
     /// 转换从音频起点重新读取，并按当前 reader 核对采样率、重建声道映射。
     pub fn convert(&self, audio: AudioSource, targets: &[Target]) -> Result<Conversion> {
-        let audio = AudioSource::new(
-            self.spec.sample_rate,
-            &self.channels,
-            "DAMF ID",
-            audio.input,
-        )?;
+        let original_audio = audio.originates_at(&self.audio);
+        let mut audio = audio.remap(self.spec.sample_rate, &self.channels, "DAMF ID")?;
+        let mut spec = self.spec.clone();
+        let mut diagnostics = self.diagnostics.clone();
+        let mut losses = Losses {
+            policy: spec.loss_policy,
+            diagnostics: &mut diagnostics,
+        };
+        let incoming = audio.ancillary_metadata(&spec, |message| {
+            losses.report(None, None, "container_metadata", message)
+        })?;
+        if original_audio {
+            spec.container_metadata = incoming;
+        } else {
+            let old_metadata = match replaced_caf_has_metadata(&self.audio) {
+                Ok(present) => present,
+                Err(error) => {
+                    losses.report(
+                        None,
+                        None,
+                        "container_metadata",
+                        format!("Cannot inspect the replaced CAF ancillary metadata: {error}"),
+                    )?;
+                    false
+                }
+            };
+            if old_metadata || incoming.is_some() {
+                losses.report(
+                    None,
+                    None,
+                    "container_metadata",
+                    "Replacement audio invalidates the source and replacement container metadata"
+                        .into(),
+                )?;
+            }
+        }
         write_conversion(
-            &self.spec,
-            self.updates()?,
+            &spec,
+            self.updates()?.map(|r| r.map(NativeObjectUpdate::from)),
+            (self.bed_updates != 0)
+                .then(|| self.bed_updates())
+                .transpose()?
+                .into_iter()
+                .flatten(),
+            std::iter::empty::<Result<AdmBedBlock>>(),
             audio,
             self.last_sample,
-            &self.diagnostics,
+            &diagnostics,
             targets,
         )
     }
@@ -948,9 +1080,12 @@ impl DamfReader {
 
 /// The conversion both readers share: check the audio covers the metadata, rewind it, schedule
 /// every update, then stream the audio through one [`MultiWriter`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_conversion(
     spec: &MasterSpec,
-    updates: impl IntoIterator<Item = Result<ObjectUpdate>>,
+    updates: impl IntoIterator<Item = Result<NativeObjectUpdate>>,
+    bed_updates: impl IntoIterator<Item = Result<BedUpdate>>,
+    native_bed_blocks: impl IntoIterator<Item = Result<AdmBedBlock>>,
     mut audio: AudioSource,
     last_sample: Option<u64>,
     read: &[MappingDiagnostic],
@@ -967,15 +1102,27 @@ pub(crate) fn write_conversion(
     }
     audio.rewind()?;
     let mut writer = MultiWriter::create(spec, targets)?;
+    let mut bed_batch = Vec::with_capacity(UPDATE_BATCH);
+    for update in bed_updates {
+        bed_batch.push(update?);
+        if bed_batch.len() == UPDATE_BATCH {
+            writer.schedule_bed_updates(&bed_batch)?;
+            bed_batch.clear();
+        }
+    }
+    writer.schedule_bed_updates(&bed_batch)?;
+    for block in native_bed_blocks {
+        writer.schedule_adm_bed_blocks(std::slice::from_ref(&block?))?;
+    }
     let mut batch = Vec::with_capacity(UPDATE_BATCH);
     for update in updates {
         batch.push(update?);
         if batch.len() == UPDATE_BATCH {
-            writer.schedule_updates(&batch)?;
+            writer.schedule_native_updates(&batch)?;
             batch.clear();
         }
     }
-    writer.schedule_updates(&batch)?;
+    writer.schedule_native_updates(&batch)?;
     let mut pcm = Vec::new();
     while audio.read_s24(AUDIO_BLOCK, &mut pcm)? > 0 {
         writer.write_block(PcmBlock::S24Le(&pcm), &[])?;
@@ -984,6 +1131,45 @@ pub(crate) fn write_conversion(
         read: read.to_vec(),
         outputs: writer.finish()?,
     })
+}
+
+pub struct BedUpdates {
+    scan: MetadataScan<BufReader<File>>,
+    skip: BTreeMap<u32, usize>,
+    beds: BTreeMap<u32, usize>,
+}
+impl std::fmt::Debug for BedUpdates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BedUpdates")
+            .field("path", &self.scan.path)
+            .finish_non_exhaustive()
+    }
+}
+impl Iterator for BedUpdates {
+    type Item = Result<BedUpdate>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let event = match self.scan.next_event() {
+                Ok(Some(e)) => e,
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(&channel) = self.beds.get(&event.id) else {
+                continue;
+            };
+            if let Some(left) = self.skip.get_mut(&event.id).filter(|left| **left > 0) {
+                *left -= 1;
+                continue;
+            }
+            let patch = bed_patch(event.patch);
+            return Some(Ok(BedUpdate {
+                channel,
+                sample: event.sample,
+                ramp_samples: patch.has_continuous().then_some(event.ramp.unwrap_or(0)),
+                patch,
+            }));
+        }
+    }
 }
 
 /// The second pass. Each item is one [`ObjectUpdate`], ready for `schedule_updates`.
@@ -1034,11 +1220,74 @@ pub struct CafReader {
     sample_rate: u32,
     frames: u64,
     position: u64,
+    unmapped_chunks: Vec<[u8; 4]>,
+    ancillary: Vec<MetadataChunk>,
 }
 fn be<const N: usize>(source: &mut impl Read) -> Result<[u8; N]> {
     let mut bytes = [0; N];
     source.read_exact(&mut bytes)?;
     Ok(bytes)
+}
+struct CafChunk {
+    kind: [u8; 4],
+    offset: u64,
+    size: u64,
+    end: u64,
+}
+fn caf_stream(file: File) -> Result<(BufReader<File>, u64)> {
+    let length = file.metadata()?.len();
+    let mut source = BufReader::new(file);
+    if &be::<4>(&mut source)? != b"caff" || be::<4>(&mut source)? != [0, 1, 0, 0] {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "not a version 1 CAF file",
+        ));
+    }
+    Ok((source, length))
+}
+fn next_caf_chunk(source: &mut BufReader<File>, at: u64, length: u64) -> Result<Option<CafChunk>> {
+    if at == length {
+        return Ok(None);
+    }
+    let offset = at
+        .checked_add(12)
+        .filter(|n| *n <= length)
+        .ok_or_else(|| Error::invalid("Truncated CAF chunk header"))?;
+    source.seek(SeekFrom::Start(at))?;
+    let kind = be::<4>(source)?;
+    let length_field = i64::from_be_bytes(be(source)?);
+    let size = if length_field == -1 && kind == *b"data" {
+        length - offset
+    } else {
+        u64::try_from(length_field).map_err(|_| Error::invalid("Invalid CAF chunk size"))?
+    };
+    let end = offset
+        .checked_add(size)
+        .filter(|n| *n <= length)
+        .ok_or_else(|| Error::invalid("CAF chunk extends past the file"))?;
+    Ok(Some(CafChunk {
+        kind,
+        offset,
+        size,
+        end,
+    }))
+}
+// 替换 WAV 时可以缺少原音频。若 CAF 仍在，只检查块头，不要求能解码其音频，也不读载荷。
+fn replaced_caf_has_metadata(path: &Path) -> Result<bool> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let (mut source, length) = caf_stream(file)?;
+    let mut at = 8;
+    while let Some(chunk) = next_caf_chunk(&mut source, at, length)? {
+        if !matches!(&chunk.kind, b"desc" | b"data" | b"free") {
+            return Ok(true);
+        }
+        at = chunk.end;
+    }
+    Ok(false)
 }
 impl CafReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1046,22 +1295,23 @@ impl CafReader {
         Self::read_header(path).map_err(|e| located(path, e))
     }
     fn read_header(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let length = file.metadata()?.len();
-        let mut source = BufReader::new(file);
+        let (mut source, length) = caf_stream(File::open(path)?)?;
         let unsupported = |m: &str| Error::new(ErrorKind::Unsupported, m);
-        if &be::<4>(&mut source)? != b"caff" || be::<4>(&mut source)? != [0, 1, 0, 0] {
-            return Err(unsupported("not a version 1 CAF file"));
-        }
         let mut at = 8u64;
         let mut format = None;
-        loop {
-            if at == length {
-                return Err(Error::invalid("CAF has no data chunk"));
-            }
-            let kind = be::<4>(&mut source)?;
-            let size = i64::from_be_bytes(be(&mut source)?);
-            at += 12;
+        let mut data = None;
+        let mut unmapped_chunks = Vec::new();
+        let mut ancillary = Vec::new();
+        let mut ancillary_bytes = 0u64;
+        let mut ancillary_ids = BTreeSet::new();
+        while let Some(CafChunk {
+            kind,
+            size,
+            offset,
+            end,
+        }) = next_caf_chunk(&mut source, at, length)?
+        {
+            at = end;
             if &kind == b"desc" {
                 if size != 32 || format.is_some() {
                     return Err(Error::invalid("invalid CAF desc chunk"));
@@ -1089,44 +1339,61 @@ impl CafReader {
                     return Err(unsupported("CAF sample rate must be a whole number"));
                 }
                 format = Some((rate as u32, channels as usize));
-                at += 32;
             } else if &kind == b"data" {
+                if data.is_some() {
+                    return Err(Error::invalid("Duplicate CAF data chunk"));
+                }
                 let (sample_rate, channels) =
                     format.ok_or_else(|| Error::invalid("CAF data precedes desc"))?;
-                let size = if size == -1 {
-                    length
-                        .checked_sub(at)
-                        .ok_or_else(|| Error::invalid("CAF data is truncated"))?
-                } else {
-                    u64::try_from(size).map_err(|_| Error::invalid("invalid CAF data size"))?
-                };
-                if size < 4 || at + size > length {
+                if size < 4 {
                     return Err(Error::invalid("CAF data is truncated"));
                 }
-                source.seek_relative(4)?;
                 let bytes = size - 4;
                 let align = channels as u64 * 3;
                 if bytes % align != 0 {
                     return Err(Error::invalid("CAF data is not whole frames"));
                 }
-                return Ok(Self {
-                    source,
-                    data_start: at + 4,
-                    channels,
-                    sample_rate,
-                    frames: bytes / align,
-                    position: 0,
-                });
+                data = Some((offset + 4, bytes / align, channels, sample_rate));
             } else {
-                let size =
-                    u64::try_from(size).map_err(|_| Error::invalid("invalid CAF chunk size"))?;
-                if at + size > length {
-                    return Err(Error::invalid("CAF chunk extends past the file"));
+                let preserve = MetadataContainer::Caf.accepts(kind);
+                if preserve {
+                    if !ancillary_ids.insert(kind) {
+                        return Err(Error::invalid("Duplicate CAF info chunk"));
+                    }
+                    ancillary_bytes = ancillary_bytes
+                        .checked_add(size)
+                        .ok_or_else(|| Error::invalid("Ancillary size overflow"))?;
+                    if ancillary_bytes <= CONTAINER_METADATA_LIMIT as u64 {
+                        let mut bytes = vec![0; size as usize];
+                        source.read_exact(&mut bytes)?;
+                        ancillary.push(MetadataChunk {
+                            id: kind,
+                            data: bytes,
+                        });
+                    }
                 }
-                source.seek(SeekFrom::Current(i64::try_from(size).unwrap_or(i64::MAX)))?;
-                at += size;
+                if kind != *b"free"
+                    && (!preserve || ancillary_bytes > CONTAINER_METADATA_LIMIT as u64)
+                    && unmapped_chunks.len() < 16
+                    && !unmapped_chunks.contains(&kind)
+                {
+                    unmapped_chunks.push(kind);
+                }
             }
         }
+        let (data_start, frames, channels, sample_rate) =
+            data.ok_or_else(|| Error::invalid("CAF has no data chunk"))?;
+        source.seek(SeekFrom::Start(data_start))?;
+        Ok(Self {
+            source,
+            data_start,
+            channels,
+            sample_rate,
+            frames,
+            position: 0,
+            unmapped_chunks,
+            ancillary,
+        })
     }
     pub fn channels(&self) -> usize {
         self.channels
@@ -1164,10 +1431,12 @@ impl std::fmt::Debug for Input {
 #[derive(Debug)]
 pub struct AudioSource {
     pub(crate) input: Input,
+    origin: Option<PathBuf>,
     /// Source channel per output channel; `None` is a silent bed slot.
     map: Vec<Option<usize>>,
     source_channels: usize,
     frames: u64,
+    position: u64,
     raw: Vec<u8>,
     float: Vec<f32>,
     mapped: Vec<f32>,
@@ -1206,10 +1475,12 @@ impl AudioSource {
             )));
         }
         Ok(Self {
+            origin: None,
             input,
             map,
             source_channels: channels,
             frames,
+            position: 0,
             raw: Vec::new(),
             float: Vec::new(),
             mapped: Vec::new(),
@@ -1218,7 +1489,72 @@ impl AudioSource {
     pub fn frames(&self) -> u64 {
         self.frames
     }
+    pub(crate) fn originates_at(&self, path: &Path) -> bool {
+        self.origin
+            .as_ref()
+            .is_some_and(|source| path.canonicalize().ok().as_ref() == Some(source))
+    }
+    pub(crate) fn remap(self, rate: u32, channels: &[Option<u32>], what: &str) -> Result<Self> {
+        let mut audio = Self::new(rate, channels, what, self.input)?.with_frame_limit(self.frames);
+        audio.origin = self.origin;
+        Ok(audio)
+    }
+    pub(crate) fn ancillary_metadata(
+        &mut self,
+        spec: &MasterSpec,
+        mut report: impl FnMut(String) -> Result<()>,
+    ) -> Result<Option<ContainerMetadata>> {
+        let (container, chunks, frames, is_s24) = match &mut self.input {
+            Input::Wave(wave) => {
+                let info = wave.info();
+                (
+                    MetadataContainer::Wave,
+                    crate::ancillary::read_wave_chunks(wave, report)?,
+                    info.frames,
+                    info.format.sample_format == macin_bwf::SampleFormat::Pcm24,
+                )
+            }
+            Input::Caf(caf) => {
+                if !caf.unmapped_chunks.is_empty() {
+                    report(format!(
+                        "CAF additional metadata is not retained; first chunk IDs: {:?}",
+                        caf.unmapped_chunks
+                    ))?;
+                }
+                (
+                    MetadataContainer::Caf,
+                    std::mem::take(&mut caf.ancillary),
+                    caf.frames,
+                    true,
+                )
+            }
+        };
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+        let mut metadata = ContainerMetadata::new(container, chunks)?;
+        metadata.origin = Some(crate::ancillary::Origin {
+            frames,
+            channels: self.source_channels,
+            sample_rate: spec.sample_rate,
+            start_sample: spec.start_sample,
+            object_tracks: spec.objects.iter().map(|o| o.id).collect(),
+            unchanged: is_s24
+                && self.map.len() == self.source_channels
+                && self.map.iter().enumerate().all(|(i, c)| *c == Some(i)),
+        });
+        Ok(Some(metadata))
+    }
+    pub(crate) fn with_origin(mut self, path: &Path) -> Self {
+        self.origin = path.canonicalize().ok();
+        self
+    }
+    pub(crate) fn with_frame_limit(mut self, frames: u64) -> Self {
+        self.frames = self.frames.min(frames);
+        self
+    }
     fn rewind(&mut self) -> Result<()> {
+        self.position = 0;
         match &mut self.input {
             Input::Caf(caf) => {
                 caf.source.seek(SeekFrom::Start(caf.data_start))?;
@@ -1233,8 +1569,13 @@ impl AudioSource {
     /// Read up to `frames` frames into `out`; returns how many were read (0 at the end).
     pub fn read_s24(&mut self, frames: usize, out: &mut Vec<u8>) -> Result<usize> {
         out.clear();
+        let frames = frames
+            .min(usize::try_from(self.frames.saturating_sub(self.position)).unwrap_or(usize::MAX));
+        if frames == 0 {
+            return Ok(0);
+        }
         let width = self.map.len();
-        match &mut self.input {
+        let read = match &mut self.input {
             Input::Caf(caf) => {
                 let read = caf.read(frames, &mut self.raw)?;
                 out.reserve(read * width * 3);
@@ -1246,7 +1587,7 @@ impl AudioSource {
                         }
                     }
                 }
-                Ok(read)
+                read
             }
             Input::Wave(wave) => {
                 self.float.resize(frames * self.source_channels, 0.);
@@ -1265,8 +1606,10 @@ impl AudioSource {
                 crate::writer::validate_pcm(pcm, width)
                     .map_err(|_| Error::invalid("WAV samples must be finite and within ±1"))?;
                 crate::writer::quantize(pcm, width, 0..read, out);
-                Ok(read)
+                read
             }
-        }
+        };
+        self.position += read as u64;
+        Ok(read)
     }
 }

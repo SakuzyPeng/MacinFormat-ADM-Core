@@ -2,8 +2,12 @@
 #![forbid(unsafe_code)]
 
 use clap::{Args, Parser, Subcommand};
-use macin_atmos::{FrameRate, LossPolicy, Target};
-use macin_format::convert::{ConvertReport, Loss, parse_frame_rate, parse_profile};
+use macin_atmos::{
+    ApproximateMappings, Approximation, FrameRate, LossPolicy, MappingOptions, Target,
+};
+use macin_format::convert::{
+    ConversionOptions, ConvertReport, Loss, parse_approximation, parse_frame_rate, parse_profile,
+};
 use macin_format::{
     AdmReport, ChunksReport, DEFAULT_METADATA_BUDGET, Error, InfoReport, Result, timecode,
 };
@@ -59,7 +63,7 @@ enum Command {
         /// track n + 1.
         #[arg(long, value_name = "WAV")]
         audio: Option<PathBuf>,
-        /// The frame rate an ADM source's outputs declare (ADM carries none; default 24).
+        /// 覆盖 ADM 输出帧率；默认读 DBMD，未提供时取 24。
         #[arg(long, value_name = "FPS", value_parser = frame_rate)]
         fps: Option<FrameRate>,
         /// Logic RF64 的 DBMD 创建来源，最多 32 字节 ASCII，默认 Created by MacinFormat。
@@ -71,6 +75,12 @@ enum Command {
         /// Drop what a profile cannot hold and report it, instead of failing.
         #[arg(long)]
         allow_loss: bool,
+        /// 按字段允许近似，可重复：diffuse-decorrelation、screen-ref-factor。默认关闭。
+        #[arg(long, value_name = "MAPPING", value_parser = approximation)]
+        approximate: Vec<Approximation>,
+        /// 原值写出兼容性受限的字段。可重复指定 cartesian-azimuth-range、damf-mid。
+        #[arg(long, value_name="FIELD", value_parser=["cartesian-azimuth-range", "damf-mid"])]
+        preserve_literal: Vec<String>,
         /// Print machine-readable JSON instead of text.
         #[arg(long)]
         json: bool,
@@ -79,6 +89,10 @@ enum Command {
 
 fn frame_rate(value: &str) -> std::result::Result<FrameRate, String> {
     parse_frame_rate(value).map_err(|e| e.message)
+}
+
+fn approximation(value: &str) -> std::result::Result<Approximation, String> {
+    parse_approximation(value).map_err(|e| e.message)
 }
 
 fn dbmd_creator<const WIDTH: usize>(value: &str) -> std::result::Result<String, String> {
@@ -161,6 +175,8 @@ fn run(cli: Cli) -> Result<()> {
             dbmd_originator,
             dbmd_product,
             allow_loss,
+            approximate,
+            preserve_literal,
             json,
         } => {
             let policy = if allow_loss {
@@ -168,14 +184,29 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 LossPolicy::Reject
             };
-            let report = macin_format::convert::convert_with_dbmd_identity(
+            let mut approximate_mappings = ApproximateMappings::default();
+            for choice in approximate {
+                approximate_mappings.enable(choice);
+            }
+            let report = macin_format::convert::convert_with_options(
                 &source,
                 audio.as_deref(),
                 &to,
-                policy,
-                fps,
-                dbmd_originator.as_deref(),
-                dbmd_product.as_deref(),
+                ConversionOptions {
+                    mapping: MappingOptions {
+                        loss_policy: policy,
+                        approximate_mappings,
+                        preserve_literal: macin_atmos::LiteralPreservation {
+                            cartesian_azimuth_range: preserve_literal
+                                .iter()
+                                .any(|v| v == "cartesian-azimuth-range"),
+                            damf_mid: preserve_literal.iter().any(|v| v == "damf-mid"),
+                        },
+                    },
+                    frame_rate: fps,
+                    dbmd_originator: dbmd_originator.as_deref(),
+                    dbmd_product: dbmd_product.as_deref(),
+                },
             )?;
             emit(&mut out, &report, json, text_convert)
         }
@@ -343,7 +374,12 @@ fn text_losses(s: &mut String, losses: &[Loss]) {
         } else {
             format!(" ({})", at.join(", "))
         };
-        *s += &format!("   lost {}{at}: {}\n", loss.field, loss.message);
+        let action = match loss.kind {
+            "approximation" => "approximate",
+            "preserved_literal" => "preserved",
+            _ => "lost",
+        };
+        *s += &format!("   {action} {}{at}: {}\n", loss.field, loss.message);
     }
 }
 
@@ -355,6 +391,9 @@ fn text_convert(r: &ConvertReport) -> String {
         r.objects,
         r.updates
     );
+    if r.bed_updates != 0 {
+        s += &format!(", {} bed updates", r.bed_updates);
+    }
     if let Some(audio) = &r.audio {
         s += &format!(", audio from {}", audio.display());
     }

@@ -462,6 +462,55 @@ fn channel_values(path: &Path) -> Vec<i32> {
         .map(|v| (f64::from(*v) * 8_388_608.).round() as i32)
         .collect()
 }
+
+fn third_party_single_content(path: &Path, programme: &str, objects: &[Object<'_>]) {
+    let grouped = path.with_extension("grouped.wav");
+    third_party(&grouped, programme, objects);
+    rewrite_axml(&grouped, path, |mut xml| {
+        // 这些夹具单独考察对象与时间线，使用 DAMF 能精确表达的固定 bed 坐标。
+        let points = [
+            [1, 0, 1],
+            [-1, 0, 1],
+            [1, -1, 0],
+            [-1, -1, 0],
+            [1, 0, 0],
+            [-1, 0, 0],
+            [-1, 1, -1],
+            [0, 1, 0],
+            [1, 1, 0],
+            [-1, 1, 0],
+        ];
+        for (label, [x, y, z]) in RC_BED.iter().zip(points) {
+            let prefix = format!("<speakerLabel>{label}</speakerLabel>");
+            xml = xml.replace(
+                &format!(r#"{prefix}<position coordinate="azimuth">0</position><position coordinate="elevation">0</position>"#),
+                &format!(r#"{prefix}<cartesian>1</cartesian><position coordinate="X">{x}</position><position coordinate="Y">{y}</position><position coordinate="Z">{z}</position>"#),
+            );
+        }
+        for i in 0..objects.len() {
+            let id = 0x1002 + i;
+            xml = xml.replace(
+                &format!("<audioContentIDRef>ACO_{id:04x}</audioContentIDRef>"),
+                "",
+            );
+            let begin = xml
+                .find(&format!("<audioContent audioContentID=\"ACO_{id:04x}\""))
+                .unwrap();
+            let end =
+                begin + xml[begin..].find("</audioContent>").unwrap() + "</audioContent>".len();
+            xml.replace_range(begin..end, "");
+            let first = xml
+                .find("<audioContent audioContentID=\"ACO_1001\"")
+                .unwrap();
+            let end = first + xml[first..].find("</audioContent>").unwrap();
+            xml.insert_str(
+                end,
+                &format!("<audioObjectIDRef>AO_{id:04x}</audioObjectIDRef>"),
+            );
+        }
+        xml
+    });
+}
 const STILL: &str = r#"rtime="00:00:00.00000" duration="00:00:00.10000"><position coordinate="X">0</position><position coordinate="Y">1</position><position coordinate="Z">0</position>"#;
 
 #[test]
@@ -514,10 +563,25 @@ fn third_party_adm_timing_gain_and_channel_order_are_read() {
         [(11, "Muted"), (12, "Late, short and quiet")],
         "objects follow their tracks"
     );
-    assert_eq!(spec.objects[0].initial.gain, Gain::Silence);
+    assert_eq!(
+        spec.objects[0]
+            .adm
+            .effective_gain(spec.objects[0].initial.gain)
+            .unwrap(),
+        Gain::Silence
+    );
     let late = &spec.objects[1].initial;
     assert!(!late.active, "inactive before its start");
-    assert!((late.gain.linear() - 0.5 * libm::pow(10., -6. / 20.)).abs() < 1e-12);
+    assert!(
+        (spec.objects[1]
+            .adm
+            .effective_gain(late.gain)
+            .unwrap()
+            .linear()
+            - 0.5 * libm::pow(10., -6. / 20.))
+        .abs()
+            < 1e-12
+    );
     let timeline: Vec<_> = read_updates(&reader)
         .iter()
         .map(|u| (u.track.0, u.sample, u.ramp_samples, u.patch.active))
@@ -535,7 +599,16 @@ fn third_party_adm_timing_gain_and_channel_order_are_read() {
     assert_eq!(ramp.position, Some([1., 1., 0.]));
     assert_eq!(ramp.extent, Some(Some(Extent::Uniform(0.3))));
     let jump = &read_updates(&reader)[2].patch;
-    assert!((jump.gain.unwrap().linear() - libm::pow(10., -18. / 20.)).abs() < 1e-12);
+    assert!(
+        (spec.objects[1]
+            .adm
+            .effective_gain(jump.gain.unwrap())
+            .unwrap()
+            .linear()
+            - libm::pow(10., -18. / 20.))
+        .abs()
+            < 1e-12
+    );
     assert_eq!(jump.importance, Some(0.4));
 
     let out = dir.path("out.wav");
@@ -558,46 +631,16 @@ fn what_the_model_cannot_hold_follows_the_loss_policy() {
             "",
             "",
             block("<zoneExclusion><zone>Left</zone></zoneExclusion>"),
+            "zone",
+        ),
+        (
+            "",
+            "",
+            "",
+            block("<unmappedBlockParameter>1</unmappedBlockParameter>"),
             "unknown_field",
         ),
-        ("", "", "", block("<diffuse>0.5</diffuse>"), "diffuse"),
-        (
-            "",
-            "",
-            "",
-            block("<headLocked>1</headLocked>"),
-            "head_tracking",
-        ),
-        (
-            "",
-            "",
-            "",
-            block("<objectDivergence>0.2</objectDivergence>"),
-            "divergence",
-        ),
-        (
-            "",
-            "",
-            "",
-            block(r#"<channelLock maxDistance="0.5">1</channelLock>"#),
-            "channel_lock_distance",
-        ),
-        ("", r#" dialogue="1""#, "", block(""), "dialog"),
-        (
-            "",
-            "",
-            r#"<positionOffset coordinate="X">0.1</positionOffset>"#,
-            block(""),
-            "position_offset",
-        ),
-        ("", r#" interact="1""#, "", block(""), "unknown_field"),
-        (
-            r#" audioProgrammeLanguage="en""#,
-            "",
-            "",
-            block(""),
-            "language",
-        ),
+        ("", r#" auditFlag="1""#, "", block(""), "unknown_field"),
     ] {
         let dir = Temp::new();
         let blocks = [block.as_str()];
@@ -622,6 +665,94 @@ fn what_the_model_cannot_hold_follows_the_loss_policy() {
         let fields: Vec<_> = reader.diagnostics().iter().map(|d| d.field).collect();
         assert!(fields.contains(&field), "{block}: {fields:?}");
     }
+}
+
+#[test]
+fn diffuse_approximation_is_opt_in_and_preserves_updates_and_missing_defaults() {
+    let dir = Temp::new();
+    let source = dir.path("diffuse.wav");
+    let blocks = [
+        r#"rtime="00:00:00.00000" duration="00:00:00.02500"><position coordinate="X">0</position><position coordinate="Y">1</position><diffuse>0.25</diffuse>"#,
+        r#"rtime="00:00:00.02500" duration="00:00:00.02500"><position coordinate="X">0</position><position coordinate="Y">1</position><diffuse>0.75</diffuse>"#,
+        r#"rtime="00:00:00.05000" duration="00:00:00.05000"><position coordinate="X">0</position><position coordinate="Y">1</position>"#,
+    ];
+    third_party_single_content(
+        &source,
+        "",
+        &[Object {
+            track: 11,
+            name: "O",
+            attributes: "",
+            elements: "",
+            blocks: &blocks,
+        }],
+    );
+    let native = AdmReader::open(&source, LossPolicy::Reject).unwrap();
+    assert_eq!(native.spec().objects[0].initial.diffuse, 0.25);
+    assert!(native.diagnostics().is_empty());
+    assert_eq!(
+        native
+            .convert(
+                native.audio().unwrap(),
+                &to(dir.path("reject-home"), Profile::DamfHome)
+            )
+            .unwrap_err()
+            .field,
+        Some("diffuse")
+    );
+    let options = MappingOptions {
+        approximate_mappings: ApproximateMappings {
+            diffuse_decorrelation: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let reader = AdmReader::open_with_options(&source, options).unwrap();
+    assert_eq!(reader.spec().objects[0].initial.diffuse, 0.25);
+    assert_eq!(reader.spec().objects[0].initial.decorrelation, 0.);
+    assert!(reader.diagnostics().is_empty());
+    let updates: Vec<_> = read_updates(&reader)
+        .iter()
+        .map(|u| (u.sample, u.patch.diffuse, u.ramp_samples))
+        .collect();
+    assert_eq!(
+        updates,
+        [(1200, Some(0.75), Some(1200)), (2400, Some(0.), Some(2400))]
+    );
+    let targets = [
+        Target {
+            path: dir.path("copy.wav"),
+            profile: Profile::Standard,
+        },
+        Target {
+            path: dir.path("home"),
+            profile: Profile::DamfHome,
+        },
+    ];
+    let report = reader.convert(reader.audio().unwrap(), &targets).unwrap();
+    assert!(report.read.is_empty());
+    assert!(report.outputs[0].diagnostics.is_empty());
+    assert_eq!(
+        report.outputs[1].diagnostics[0].kind,
+        MappingDiagnosticKind::Approximation
+    );
+    assert_eq!(
+        channel_values(&targets[0].path),
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 11]
+    );
+    let damf =
+        DamfReader::open_with_options(targets[1].path.join("master.atmos"), options).unwrap();
+    assert_eq!(damf.spec().objects[0].initial.decorrelation, 0.25);
+    let back = dir.path("back.wav");
+    damf.convert(damf.audio().unwrap(), &to(back.clone(), Profile::Standard))
+        .unwrap();
+    let reopened = AdmReader::open_with_options(back, options).unwrap();
+    let back_updates: Vec<_> = read_updates(&reopened)
+        .iter()
+        .map(|u| (u.sample, u.patch.diffuse))
+        .collect();
+    assert_eq!(back_updates, [(1200, Some(0.75)), (2400, Some(0.))]);
+    assert_eq!(reopened.spec().objects[0].initial.diffuse, 0.25);
 }
 
 #[test]
@@ -781,7 +912,7 @@ fn boolean_spellings_preserve_states_and_loss_checks() {
         let block = format!(
             "{STILL}<cartesian>true</cartesian><channelLock>{literal}</channelLock><screenRef>{literal}</screenRef>"
         );
-        third_party(
+        third_party_single_content(
             &source,
             "",
             &[Object {
@@ -820,24 +951,16 @@ fn boolean_spellings_preserve_states_and_loss_checks() {
                 &format!("<screenRef>{literal}</screenRef><headLocked>{literal}</headLocked>"),
             )
         });
-        if enabled {
-            let error = AdmReader::open(&locked, LossPolicy::Reject).unwrap_err();
-            assert_eq!(error.field, Some("head_tracking"));
-            let reader = AdmReader::open(locked, LossPolicy::Allow).unwrap();
-            assert!(
-                reader
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.field == "head_tracking")
-            );
-        } else {
-            assert!(
-                AdmReader::open(locked, LossPolicy::Reject)
-                    .unwrap()
-                    .diagnostics()
-                    .is_empty()
-            );
-        }
+        let locked = AdmReader::open(locked, LossPolicy::Reject).unwrap();
+        assert!(locked.diagnostics().is_empty());
+        assert_eq!(
+            locked.spec().objects[0].initial.head_tracking,
+            if enabled {
+                HeadTracking::HeadRelative
+            } else {
+                HeadTracking::SceneRelative
+            }
+        );
     }
 }
 
@@ -893,11 +1016,11 @@ fn omitted_cartesian_z_defaults_to_zero_in_each_block() {
 }
 
 #[test]
-fn bed_block_timelines_follow_the_loss_policy() {
+fn native_bed_block_times_preserve_gaps_short_spans_and_overlap() {
     let dir = Temp::new();
     let source = dir.path("bed.wav");
     third_party(&source, "", &[]);
-    for (name, intervals, lossy) in [
+    for (name, intervals, _) in [
         ("late", vec![("05000", "05000")], true),
         ("short", vec![("00000", "05000")], true),
         ("gap", vec![("00000", "02500"), ("05000", "05000")], true),
@@ -923,29 +1046,22 @@ fn bed_block_timelines_follow_the_loss_policy() {
             xml.replace_range(begin..close + "</audioBlockFormat>".len(), &blocks);
             xml
         });
-        if lossy {
-            let error = AdmReader::open(&input, LossPolicy::Reject).unwrap_err();
-            assert_eq!(error.field, Some("bed_timing"), "{name}: {error}");
-        } else {
-            assert!(
-                AdmReader::open(&input, LossPolicy::Reject)
-                    .unwrap()
-                    .diagnostics()
-                    .is_empty()
-            );
-        }
-        let reader = AdmReader::open(input, LossPolicy::Allow).unwrap();
-        assert_eq!(
-            reader.diagnostics().iter().any(|d| d.field == "bed_timing"),
-            lossy,
-            "{name}"
-        );
+        let reader = AdmReader::open(&input, LossPolicy::Reject).unwrap();
+        assert!(reader.diagnostics().is_empty());
+        assert_eq!(reader.bed_update_count(), (intervals.len() - 1) as u64);
+        let output = dir.path(&format!("{name}-out.wav"));
         reader
             .convert(
                 reader.audio().unwrap(),
-                &to(dir.path(&format!("{name}-out.wav")), Profile::Standard),
+                &to(output.clone(), Profile::Standard),
             )
             .unwrap();
+        let back = AdmReader::open(output, LossPolicy::Reject).unwrap();
+        assert_eq!(reader.spec().bed_blocks, back.spec().bed_blocks);
+        assert_eq!(
+            reader.bed_blocks().collect::<Result<Vec<_>>>().unwrap(),
+            back.bed_blocks().collect::<Result<Vec<_>>>().unwrap()
+        );
     }
 }
 
@@ -973,7 +1089,7 @@ fn unmapped_bed_and_channel_fields_are_reported() {
         (
             "coordinate=\"X\">-1",
             "coordinate=\"X\" screenEdgeLock=\"left\">-1",
-            "bed_position",
+            "static_bed_edge",
         ),
         (
             "<audioBlockFormat ",
@@ -991,11 +1107,33 @@ fn unmapped_bed_and_channel_fields_are_reported() {
     {
         let input = dir.path(&format!("bed-{i}.wav"));
         rewrite_axml(&source, &input, |xml| xml.replacen(before, after, 1));
-        let error = AdmReader::open(&input, LossPolicy::Reject).unwrap_err();
-        assert_eq!(error.field, Some(field), "{input:?}: {error}");
-        let reader = AdmReader::open(input, LossPolicy::Allow).unwrap();
-        assert_eq!(reader.diagnostics().len(), 1);
-        assert_eq!(reader.diagnostics()[0].field, field);
+        if field == "static_bed_edge" {
+            let reader = AdmReader::open(&input, LossPolicy::Reject).unwrap();
+            assert!(reader.diagnostics().is_empty());
+            assert!(reader.spec().bed_geometry[0].elements.iter().any(|e| {
+                e.attributes
+                    .iter()
+                    .any(|(k, v)| k == "screenEdgeLock" && v == "left")
+            }));
+            continue;
+        }
+        if field == "channel_frequency" {
+            let reader = AdmReader::open(&input, LossPolicy::Reject).unwrap();
+            assert_eq!(
+                reader.spec().bed_channel_adm[0].elements[0].name,
+                "frequency"
+            );
+            assert!(reader.diagnostics().is_empty());
+            continue;
+        }
+        let reader = AdmReader::open(&input, LossPolicy::Reject).unwrap();
+        let block = reader.spec().bed_blocks[0].as_ref().unwrap();
+        match field {
+            "bed_importance" => assert_eq!(block.importance, Some(3)),
+            "bed_gain" => assert_eq!(block.gain, Some(Gain::Linear(1.00000001))),
+            _ => assert_eq!(block.headphone_virtualise.unwrap().bypass, Some(true)),
+        };
+        assert!(reader.diagnostics().is_empty());
     }
     let defaults = dir.path("bed-defaults.wav");
     rewrite_axml(&source, &defaults, |xml| {
@@ -1037,18 +1175,12 @@ fn unmapped_bed_and_channel_fields_are_reported() {
             );
             xml
         });
-        let error = AdmReader::open(&input, LossPolicy::Reject).unwrap_err();
+        let reader = AdmReader::open(input, LossPolicy::Reject).unwrap();
         assert_eq!(
-            (error.field, error.track),
-            (Some("channel_frequency"), Some(TrackId(11)))
+            reader.spec().objects[0].channel_adm.elements[0].name,
+            "frequency"
         );
-        let reader = AdmReader::open(input, LossPolicy::Allow).unwrap();
-        assert!(
-            reader
-                .diagnostics()
-                .iter()
-                .any(|d| d.track == Some(TrackId(11)) && d.field == "channel_frequency")
-        );
+        assert!(reader.diagnostics().is_empty());
     }
 }
 
@@ -1066,7 +1198,7 @@ fn finite_last_blocks_stop_objects_at_their_effective_end() {
             .replacen(".00000", ".02500", 1)
             .replace(".10000", ".02500")
             .replace("coordinate=\"X\">0", "coordinate=\"X\">1");
-        third_party(
+        third_party_single_content(
             &source,
             "",
             &[Object {
@@ -1112,7 +1244,7 @@ fn replacement_audio_preserves_object_end_boundaries() {
     for attributes in ["", " duration=\"00:00:00.10000\""] {
         let dir = Temp::new();
         let source = dir.path("source.wav");
-        third_party(
+        third_party_single_content(
             &source,
             "",
             &[Object {
@@ -1224,7 +1356,22 @@ fn streaming_preserves_unsorted_blocks_and_inherited_namespaces() {
         )
         .unwrap();
     for (i, input) in [unordered, namespaced].into_iter().enumerate() {
-        let reader = AdmReader::open(input, LossPolicy::Reject).unwrap();
+        let reader = AdmReader::open(
+            input,
+            if i == 0 {
+                LossPolicy::Reject
+            } else {
+                LossPolicy::Allow
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reader
+                .diagnostics()
+                .iter()
+                .any(|d| d.field == "unknown_field"),
+            i == 1
+        );
         assert_eq!(
             reader.spec().objects[0].initial,
             expected.spec().objects[0].initial

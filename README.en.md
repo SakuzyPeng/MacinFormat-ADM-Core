@@ -229,7 +229,7 @@ use macin_atmos::adm::AdmReader;
 use macin_atmos::{FrameRate, LossPolicy, Profile, Result, Target};
 
 fn adm_to_damf() -> Result<()> {
-    // ADM carries no frame rate; outputs default to 24 fps, so set it when it matters.
+    // Read the frame rate from DBMD by default; override it explicitly when needed.
     let reader = AdmReader::open("result.wav", LossPolicy::Reject)?.with_frame_rate(FrameRate::Fps25);
     let targets = [
         Target { path: "from-adm-home".into(), profile: Profile::DamfHome },
@@ -271,7 +271,6 @@ object AO_100b "Moving object"  Objects
 $ mfadm convert film/master.atmos --to standard=film.wav --to 3dof=film-3dof --allow-loss
 film/master.atmos (home): 2 objects, 3 updates
 -> film.wav (standard): 96000 frames, 12 channels, 48000 Hz
-   lost head_tracking (track 10, sample 36000): Property has no exact mapping in this ADM profile
    lost binaural_mode (track 10, sample 36000): Property has no exact mapping in this ADM profile
 -> film-3dof (3dof): 96000 frames, 12 channels, 48000 Hz
 ```
@@ -296,8 +295,9 @@ once and every output carries identical audio. What each profile can express and
 ## Scope and known limits
 
 - **Loss is refused by default**: under `LossPolicy::Reject`, semantics the target profile cannot express
-  exactly are an error naming the field; only `Allow` (or `--allow-loss`) degrades, recording each loss as a
-  diagnostic. See [semantic loss and diagnostics](docs/REFERENCE.en.md#semantic-loss-and-diagnostics).
+  exactly are an error naming the field. `--approximate` authorises approximations per field; other
+  degradations still require `Allow` (or `--allow-loss`). Both are recorded in diagnostics.
+  See [semantic loss and diagnostics](docs/REFERENCE.en.md#semantic-loss-and-diagnostics).
 - **Masters have one shape**: a fixed 7.1.2 bed plus up to 118 objects, 48/96 kHz, 24-bit; no multi-bed
   authoring or resampling.
 - **Reading covers the Atmos subset**: one programme, at most one 7.1.2 bed, single-track Cartesian objects.
@@ -305,8 +305,9 @@ once and every output carries identical audio. What each profile can express and
   under [reading DAMF](docs/REFERENCE.en.md#reading-and-converting-damf) and
   [reading ADM](docs/REFERENCE.en.md#reading-and-converting-adm). General `Document` / `Snapshot` parsing is
   not limited to it.
-- **ADM carries no frame rate**: outputs converted from ADM default to 24 fps; set it with `with_frame_rate` or
-  `--fps`.
+- **Native mappings**: ADM retains object parameters, bed blocks and track extension attributes. DAMF retains bed state and rendering events. Select interoperability-limited spellings individually with `--preserve-literal`. See the
+  [format reference](docs/REFERENCE.en.md#native-adm-metadata-and-ancillary-chunks) for scope and limits.
+- **Frame rate**: recovered from recognised DBMD, otherwise 24 fps; override it with `with_frame_rate` or `--fps`.
 - **Atomic commit, no overwrite**: nothing is published until writing finishes, and an existing target is never
   overwritten; a failed `MultiWriter` publish withdraws what it already published, but cannot survive a crash
   that lands exactly between two renames.

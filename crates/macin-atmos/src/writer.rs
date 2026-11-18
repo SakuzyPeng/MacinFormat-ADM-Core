@@ -5,6 +5,8 @@ use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod bed;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy)]
@@ -42,20 +44,28 @@ impl Ramp {
 #[derive(Debug, Clone)]
 struct Timeline {
     state: ObjectState,
+    custom_zones: std::sync::Arc<[ExclusionZone]>,
+    initial_static: StaticChannelMetadata,
     position: Ramp,
     gain: Ramp,
     extent: Ramp,
+    diffuse: Ramp,
+    divergence: Ramp,
     cursor: u64,
     last_event: u64,
     block_number: u32,
 }
 impl Timeline {
-    fn new(state: ObjectState) -> Self {
+    fn new(state: ObjectState, zones: &[ExclusionZone]) -> Self {
         Self {
             state,
+            custom_zones: std::sync::Arc::from(zones),
+            initial_static: state.into(),
             position: Ramp::fixed(state.position),
             gain: Ramp::fixed([state.gain.linear(); 3]),
             extent: Ramp::fixed(state.extent.map_or([0.; 3], Extent::xyz)),
+            diffuse: Ramp::fixed([state.diffuse; 3]),
+            divergence: Ramp::fixed(divergence_values(state.divergence)),
             cursor: 0,
             last_event: 0,
             block_number: 0,
@@ -78,7 +88,23 @@ impl Timeline {
                 state.extent.map_or([0.; 3], Extent::xyz),
             );
         }
+        if event.patch.diffuse.is_some() {
+            self.diffuse = self
+                .diffuse
+                .update(event.sample, length, [state.diffuse; 3]);
+        } else if event.patch.decorrelation.is_some() {
+            // decorr 的近似按事件取值，即使同一事件含有单独的运动 ramp。
+            self.diffuse = Ramp::fixed([state.diffuse; 3]);
+        }
+        if event.patch.divergence.is_some() {
+            self.divergence =
+                self.divergence
+                    .update(event.sample, length, divergence_values(state.divergence));
+        }
         self.state = state;
+        if event.sample == 0 {
+            self.initial_static = state.into();
+        }
         self.last_event = event.sample;
     }
     fn write_until(
@@ -89,7 +115,13 @@ impl Timeline {
         out: &mut dyn Write,
     ) -> Result<()> {
         while self.cursor < end {
-            let ramps = [self.position, self.gain, self.extent];
+            let ramps = [
+                self.position,
+                self.gain,
+                self.extent,
+                self.diffuse,
+                self.divergence,
+            ];
             let next = ramps
                 .iter()
                 .map(|r| r.end)
@@ -97,6 +129,20 @@ impl Timeline {
                 .fold(end, u64::min);
             let mut state = self.state;
             state.position = self.position.at(next);
+            state.diffuse = self.diffuse.at(next)[0];
+            let values = self.divergence.at(next);
+            if state.divergence.is_some() || self.divergence.end > next && values != [0.; 3] {
+                let target = state.divergence;
+                state.divergence = Some(ObjectDivergence {
+                    value: values[0],
+                    azimuth_range: (!target.is_some_and(|v| v.position_range.is_some())
+                        && (target.is_some_and(|v| v.azimuth_range.is_some()) || values[1] != 0.))
+                        .then_some(values[1]),
+                    position_range: (!target.is_some_and(|v| v.azimuth_range.is_some())
+                        && (target.is_some_and(|v| v.position_range.is_some()) || values[2] != 0.))
+                        .then_some(values[2]),
+                });
+            }
             state.gain = Gain::Linear(self.gain.at(next)[0]);
             if state.extent.is_some() {
                 state.extent = Some(Extent::Cartesian(self.extent.at(next)));
@@ -105,7 +151,7 @@ impl Timeline {
                 .block_number
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Too many ADM blocks"))?;
-            metadata::write_adm_block(
+            metadata::write_native_object_block(
                 out,
                 index,
                 self.block_number,
@@ -121,15 +167,35 @@ impl Timeline {
                 },
                 spec.sample_rate,
                 spec.profile,
+                spec.approximate_mappings,
+                spec.preserve_literal,
+                &self.custom_zones,
             )?;
             self.cursor = next;
         }
         Ok(())
     }
 }
+fn divergence_values(value: Option<ObjectDivergence>) -> [f64; 3] {
+    value.map_or([0.; 3], |v| {
+        [
+            v.value,
+            v.azimuth_range.unwrap_or(0.),
+            v.position_range.unwrap_or(0.),
+        ]
+    })
+}
 struct Track {
     timeline: Timeline,
     spool: BufWriter<File>,
+}
+struct BedTrack {
+    state: BedState,
+    initial_static: StaticChannelMetadata,
+    last_event: u64,
+    spool: BufWriter<File>,
+    number: u32,
+    end: Option<u64>,
 }
 enum Audio {
     Bwf(Writer<BufWriter<File>>),
@@ -156,6 +222,7 @@ pub struct MasterWriter {
     temp: PathBuf,
     audio: Option<Audio>,
     tracks: Vec<Track>,
+    beds: Vec<BedTrack>,
     frames: u64,
     failed: bool,
     diagnostics: Vec<MappingDiagnostic>,
@@ -174,6 +241,7 @@ impl Drop for MasterWriter {
     fn drop(&mut self) {
         self.audio.take();
         self.tracks.clear();
+        self.beds.clear();
         let _ = fs::remove_dir_all(&self.temp);
     }
 }
@@ -192,23 +260,170 @@ impl MasterWriter {
             return Err(Error::invalid("Output parent must exist"));
         }
         let mut diagnostics = Vec::new();
+        if spec
+            .container_metadata
+            .as_ref()
+            .is_some_and(|m| !m.matches(&spec, None))
+        {
+            loss(
+                spec.loss_policy,
+                None,
+                None,
+                "container_metadata",
+                "Ancillary metadata requires the original container family, audio, channel order, rate and programme start",
+                &mut diagnostics,
+            )?;
+            spec.container_metadata = None;
+        }
         for object in &mut spec.objects {
+            if !object.custom_zones.is_empty() && !spec.profile.is_adm() {
+                loss(
+                    spec.loss_policy,
+                    Some(object.id),
+                    Some(0),
+                    "zone",
+                    "Custom ADM zones have no DAMF preset",
+                    &mut diagnostics,
+                )?;
+                object.custom_zones.clear();
+            }
             object.initial = mapped(
                 spec.profile,
-                spec.loss_policy,
+                MappingOptions {
+                    loss_policy: spec.loss_policy,
+                    approximate_mappings: spec.approximate_mappings,
+                    preserve_literal: spec.preserve_literal,
+                },
                 object.id,
                 0,
                 object.initial,
+                None,
                 &mut diagnostics,
             )?;
+        }
+        for channel in 0..BED_CHANNELS {
+            let raw_gain = spec.bed_blocks[channel]
+                .as_ref()
+                .map_or(spec.bed[channel].gain, |b| b.gain.unwrap_or_default());
+            spec.bed[channel] = if let Some(b) = &spec.bed_blocks[channel] {
+                let sample = bed::interval(&spec, b)?.0;
+                bed::from_block(&spec, b, spec.bed[channel], sample, &mut diagnostics)?
+            } else {
+                let state = spec.bed[channel];
+                mapped_bed(
+                    spec.profile,
+                    spec.loss_policy,
+                    spec.preserve_literal,
+                    channel,
+                    0,
+                    state,
+                    &mut diagnostics,
+                )?
+            };
+            spec.bed[channel].gain = raw_gain;
+        }
+        if !spec.profile.is_adm() {
+            for (channel, geometry) in spec.bed_geometry.iter().enumerate() {
+                if spec.bed_blocks[channel].is_none()
+                    && !geometry.is_canonical_bed(metadata::bed_position(channel))?
+                {
+                    loss(
+                        spec.loss_policy,
+                        None,
+                        None,
+                        "bed_position",
+                        &format!(
+                            "DAMF cannot retain ADM speaker geometry for bed channel {}",
+                            BED_LABELS[channel]
+                        ),
+                        &mut diagnostics,
+                    )?;
+                }
+            }
+            for (track, names) in spec
+                .objects
+                .iter()
+                .map(|o| (Some(o.id), &o.channel_names))
+                .chain(spec.bed_channel_names.iter().map(|n| (None, n)))
+            {
+                if !names.extensions.is_empty() {
+                    loss(
+                        spec.loss_policy,
+                        track,
+                        None,
+                        "track_extensions",
+                        "DAMF cannot retain XML track extension attributes",
+                        &mut diagnostics,
+                    )?;
+                }
+            }
+            let mut metadata = vec![
+                (None, "programme", &spec.adm),
+                (None, "bed object", &spec.bed_adm),
+                (None, "bed pack", &spec.bed_pack_adm),
+            ];
+            metadata.extend(spec.contents.iter().map(|c| (None, "content", &c.adm)));
+            metadata.extend(
+                spec.bed_channel_adm
+                    .iter()
+                    .map(|m| (None, "bed channel", m)),
+            );
+            for object in &spec.objects {
+                metadata.extend([
+                    (Some(object.id), "object", &object.adm),
+                    (Some(object.id), "pack", &object.pack_adm),
+                    (Some(object.id), "channel", &object.channel_adm),
+                ]);
+            }
+            for (track, owner, metadata) in metadata {
+                for field in metadata.fields() {
+                    let field = if field == "importance" && owner.ends_with("pack") {
+                        "pack_importance"
+                    } else {
+                        field
+                    };
+                    loss(
+                        spec.loss_policy,
+                        track,
+                        None,
+                        field,
+                        &format!("Native ADM {owner} metadata has no DAMF mapping"),
+                        &mut diagnostics,
+                    )?;
+                }
+            }
         }
         // DAMF has no programme name. The name is descriptive, not rendering semantics, so a DAMF
         // master drops it without reporting a loss, deliberately.
         if spec.profile.is_adm() {
             for (field, lost) in [
                 ("screen_size_ratio", spec.screen_size_ratio != 1.),
-                ("bed_distribution", spec.bed_distribution),
-                ("warp_mode", spec.warp_mode != WarpMode::LoRo),
+                (
+                    "bed_distribution",
+                    spec.profile == Profile::Standard
+                        && (spec.bed_distribution || !spec.bed_distribution_present),
+                ),
+                (
+                    "warp_mode",
+                    spec.profile == Profile::Standard && spec.warp_mode != WarpMode::LoRo,
+                ),
+                (
+                    "sc_bed_configuration",
+                    spec.profile == Profile::Standard && spec.sc_bed_configuration != [3],
+                ),
+                (
+                    "downmix_type",
+                    spec.profile == Profile::Standard && spec.downmix_mode != DownmixMode::LoRo,
+                ),
+                (
+                    "ls_rs_phase_shift",
+                    spec.profile == Profile::Standard && spec.surround_phase_shift,
+                ),
+                (
+                    "trim_mode",
+                    spec.profile == Profile::Standard
+                        && spec.trim_mode != [Some(TrimValues::default()); 4],
+                ),
             ] {
                 if lost {
                     loss(
@@ -221,16 +436,55 @@ impl MasterWriter {
                     )?;
                 }
             }
+        } else {
+            if spec.sc_bed_configuration.is_empty() {
+                loss(
+                    spec.loss_policy,
+                    None,
+                    None,
+                    "sc_bed_configuration",
+                    "An unspecified DBMD configuration has no exact DAMF form; using [3]",
+                    &mut diagnostics,
+                )?;
+                spec.sc_bed_configuration.push(3);
+            }
+            if spec.contents.len() > 1 {
+                loss(
+                    spec.loss_policy,
+                    None,
+                    None,
+                    "content_structure",
+                    "DAMF cannot retain multiple ADM content groups",
+                    &mut diagnostics,
+                )?;
+            }
+            if spec.contents.iter().any(|c| {
+                c.dialogue.is_some_and(|d| {
+                    d != (ContentDialogue {
+                        kind: ContentKind::Mixed,
+                        subtype: 0,
+                    })
+                })
+            }) {
+                loss(
+                    spec.loss_policy,
+                    None,
+                    None,
+                    "dialog",
+                    "ADM content dialogue classification has no exact DAMF mapping",
+                    &mut diagnostics,
+                )?;
+            }
         }
         // Validate fixed-width fields before creating any files.
         if spec.profile == Profile::Logic {
-            dbmd::build_logic_dbmd(
-                spec.channels(),
-                spec.frame_rate,
-                &spec.dbmd_originator,
-                &spec.dbmd_product,
-            )
-            .map_err(Error::invalid)?;
+            let channels: Vec<_> = spec
+                .bed
+                .iter()
+                .map(|b| b.object_state().into())
+                .chain(spec.objects.iter().map(|o| o.initial.into()))
+                .collect();
+            dbmd::build_from_spec(&spec, &channels)?;
         }
         let mut temp = None;
         for _ in 0..100 {
@@ -256,6 +510,7 @@ impl MasterWriter {
             temp,
             audio: None,
             tracks: Vec::new(),
+            beds: Vec::new(),
             frames: 0,
             failed: false,
             diagnostics,
@@ -306,7 +561,73 @@ impl MasterWriter {
             )?;
             Audio::Caf(file)
         });
+        for (channel, mut state) in self.spec.bed.iter().copied().enumerate() {
+            if !self.spec.profile.is_adm() {
+                state.gain = self.spec.bed_adm.effective_gain(state.gain)?;
+                state.validate()?;
+            }
+            let mut spool = BufWriter::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(self.temp.join(format!("bed-{channel}.tmp")))?,
+            );
+            let first = self.spec.bed_blocks[channel].as_ref();
+            let (sample, end) = first
+                .map(|b| bed::interval(&self.spec, b))
+                .transpose()?
+                .unwrap_or((
+                    self.spec.bed_timing.and_then(|t| t.start).unwrap_or(0),
+                    self.spec.bed_timing.and_then(AdmTiming::end),
+                ));
+            if self.spec.profile.is_adm() {
+                if let Some(b) = first {
+                    metadata::write_adm_bed_block(
+                        &mut spool,
+                        b,
+                        1,
+                        self.spec.sample_rate,
+                        self.spec.profile,
+                    )?;
+                }
+            } else {
+                let active = state.active && end.is_none_or(|end| sample < end);
+                let mut initial = state;
+                initial.active = active && sample == 0;
+                spool.write_all(
+                    metadata::damf_bed_event(channel as u32, 0, BedPatch::full(initial), Some(0))?
+                        .as_bytes(),
+                )?;
+                if sample != 0 && active {
+                    spool.write_all(
+                        metadata::damf_bed_event(
+                            channel as u32,
+                            sample,
+                            BedPatch {
+                                active: Some(true),
+                                ..Default::default()
+                            },
+                            None,
+                        )?
+                        .as_bytes(),
+                    )?;
+                }
+            }
+            self.beds.push(BedTrack {
+                state,
+                initial_static: state.into(),
+                last_event: sample,
+                number: u32::from(first.is_some()),
+                end,
+                spool,
+            });
+        }
         for (i, object) in self.spec.objects.iter().enumerate() {
+            let mut initial = object.initial;
+            if !self.spec.profile.is_adm() {
+                initial.gain = object.adm.effective_gain(initial.gain)?;
+                initial.validate()?;
+            }
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -314,17 +635,12 @@ impl MasterWriter {
             let mut spool = BufWriter::new(file);
             if !self.spec.profile.is_adm() {
                 spool.write_all(
-                    metadata::damf_event(
-                        (i + 10) as u32,
-                        0,
-                        ObjectPatch::full(object.initial),
-                        Some(0),
-                    )?
-                    .as_bytes(),
+                    metadata::damf_event((i + 10) as u32, 0, ObjectPatch::full(initial), Some(0))?
+                        .as_bytes(),
                 )?;
             }
             self.tracks.push(Track {
-                timeline: Timeline::new(object.initial),
+                timeline: Timeline::new(initial, &object.custom_zones),
                 spool,
             });
         }
@@ -350,13 +666,199 @@ impl MasterWriter {
         let prepared = self.prepare(updates)?;
         self.commit(prepared)
     }
+
+    /// 调度规范 bed 声道的更新，不借用对象 TrackId 命名空间。
+    pub fn schedule_bed_updates(&mut self, updates: &[BedUpdate]) -> Result<()> {
+        self.ready()?;
+        let prepared = self.prepare_beds(updates)?;
+        self.commit_beds(prepared)
+    }
+
+    fn prepare_beds(&self, updates: &[BedUpdate]) -> Result<PreparedBeds> {
+        let mut states: Vec<_> = self
+            .beds
+            .iter()
+            .map(|b| (b.state, b.last_event, b.initial_static))
+            .collect();
+        let mut diagnostics = self.diagnostics.clone();
+        let mut events = Vec::with_capacity(updates.len());
+        for event in updates {
+            let previous = states
+                .get_mut(event.channel)
+                .ok_or_else(|| Error::invalid("Bed channel must be in 0..10"))?;
+            if event.sample < self.frames || event.sample < previous.1 {
+                return Err(Error::invalid("Bed metadata samples must not go backwards"));
+            }
+            if self.spec.bed_blocks[event.channel].is_some() {
+                return Err(Error::invalid(
+                    "Use native bed blocks consistently on this channel",
+                ));
+            }
+            if event.patch.has_continuous() != event.ramp_samples.is_some() {
+                return Err(Error::invalid(
+                    "Continuous bed properties require an explicit ramp; discrete updates must not reset it",
+                ));
+            }
+            event
+                .sample
+                .checked_add(event.ramp_samples.unwrap_or(0))
+                .ok_or_else(|| Error::invalid("Bed ramp end overflow"))?;
+            if self.spec.profile.is_adm() && event.ramp_samples.is_some_and(|r| r != 0) {
+                loss(
+                    self.spec.loss_policy,
+                    None,
+                    Some(event.sample),
+                    "bed_ramp",
+                    "ADM DirectSpeakers has no independent DAMF rampLength; writing the target value",
+                    &mut diagnostics,
+                )?;
+            }
+            let mut patch = event.patch;
+            if !self.spec.profile.is_adm()
+                && let Some(g) = patch.gain
+            {
+                patch.gain = Some(self.spec.bed_adm.effective_gain(g)?);
+            }
+            let mut state = mapped_bed(
+                self.spec.profile,
+                self.spec.loss_policy,
+                self.spec.preserve_literal,
+                event.channel,
+                event.sample,
+                patch.apply(previous.0),
+                &mut diagnostics,
+            )?;
+            if self.spec.profile.is_adm() && event.sample != 0 {
+                let source = state.object_state();
+                for (field, changed) in [
+                    (
+                        "bed_head_tracking",
+                        self.spec.profile == Profile::Logic
+                            && source.head_tracking != previous.2.head_tracking,
+                    ),
+                    (
+                        "bed_binaural_mode",
+                        source.binaural_mode != previous.2.binaural_mode,
+                    ),
+                    (
+                        "bed_trim_bypass",
+                        source.trim_bypass != previous.2.trim_bypass,
+                    ),
+                ] {
+                    if changed {
+                        loss(
+                            self.spec.loss_policy,
+                            None,
+                            Some(event.sample),
+                            field,
+                            &format!(
+                                "Bed {} has dynamic metadata this ADM profile cannot retain; keeping its initial value",
+                                BED_LABELS[event.channel]
+                            ),
+                            &mut diagnostics,
+                        )?;
+                    }
+                }
+                if self.spec.profile == Profile::Logic {
+                    state.head_tracking = previous.2.head_tracking;
+                }
+                state.binaural_mode = previous.2.binaural_mode;
+                state.trim_bypass = previous.2.trim_bypass;
+            }
+            let mut mapped_event = *event;
+            mapped_event.patch = patch;
+            if mapped_event.patch.binaural_mode == Some(BinauralMode::Mid) {
+                mapped_event.patch.binaural_mode = Some(state.binaural_mode);
+            }
+            previous.0 = state;
+            previous.1 = event.sample;
+            if event.sample == 0 {
+                previous.2 = state.object_state().into();
+            }
+            events.push((mapped_event, state, event.patch.gain));
+        }
+        Ok(PreparedBeds {
+            events,
+            diagnostics,
+        })
+    }
+
+    fn commit_beds(&mut self, prepared: PreparedBeds) -> Result<()> {
+        for (event, state, raw_gain) in prepared.events {
+            let track = &mut self.beds[event.channel];
+            let result = if self.spec.profile.is_adm() {
+                if event.sample > track.last_event {
+                    let origin = self.spec.bed_timing.and_then(|t| t.start).unwrap_or(0);
+                    let b = metadata::bed_state_block(
+                        &self.spec,
+                        event.channel,
+                        track.state,
+                        AdmTiming {
+                            start: Some(track.last_event - origin),
+                            duration: Some(event.sample - track.last_event),
+                        },
+                    );
+                    track.number = track
+                        .number
+                        .checked_add(1)
+                        .ok_or_else(|| Error::invalid("Too many bed blocks"))?;
+                    metadata::write_adm_bed_block(
+                        &mut track.spool,
+                        &b,
+                        track.number,
+                        self.spec.sample_rate,
+                        self.spec.profile,
+                    )
+                } else {
+                    Ok(())
+                }
+            } else {
+                metadata::damf_bed_event(
+                    event.channel as u32,
+                    event.sample,
+                    event.patch,
+                    event.ramp_samples,
+                )
+                .and_then(|s| track.spool.write_all(s.as_bytes()).map_err(Into::into))
+            };
+            if let Err(error) = result {
+                self.failed = true;
+                return Err(error);
+            }
+            track.state = state;
+            track.last_event = event.sample;
+            if event.sample == 0 {
+                track.initial_static = state.object_state().into();
+                self.spec.bed[event.channel] = BedState {
+                    gain: raw_gain.unwrap_or(self.spec.bed[event.channel].gain),
+                    ..state
+                };
+            }
+        }
+        self.diagnostics = prepared.diagnostics;
+        Ok(())
+    }
     /// Validate and map updates without touching any spool, so a rejection leaves the writer
     /// exactly as it was. `MultiWriter` prepares on every target before committing to any.
+    pub fn schedule_native_updates(&mut self, updates: &[NativeObjectUpdate]) -> Result<()> {
+        self.ready()?;
+        let prepared = self.prepare_native(updates)?;
+        self.commit(prepared)
+    }
+    fn prepare_native(&self, updates: &[NativeObjectUpdate]) -> Result<Prepared> {
+        self.prepare_objects(updates.iter().map(|u| (&u.event, u.zones.as_deref())))
+    }
     fn prepare(&self, updates: &[ObjectUpdate]) -> Result<Prepared> {
+        self.prepare_objects(updates.iter().map(|u| (u, None)))
+    }
+    fn prepare_objects<'a>(
+        &self,
+        updates: impl ExactSizeIterator<Item = (&'a ObjectUpdate, Option<&'a [ExclusionZone]>)>,
+    ) -> Result<Prepared> {
         let mut states: Vec<_> = self.tracks.iter().map(|t| t.timeline.clone()).collect();
         let mut diagnostics = self.diagnostics.clone();
         let mut prepared = Vec::with_capacity(updates.len());
-        for event in updates {
+        for (event, zones) in updates {
             let index = self
                 .spec
                 .objects
@@ -398,18 +900,58 @@ impl MasterWriter {
                 .checked_add(event.ramp_samples.unwrap_or(0))
                 .ok_or_else(|| Error::invalid("Ramp end overflow"))?;
             metadata::sample_time(event.sample, self.spec.sample_rate, self.spec.profile)?;
+            let mut event = *event;
+            if !self.spec.profile.is_adm()
+                && let Some(g) = event.patch.gain
+            {
+                event.patch.gain = Some(self.spec.objects[index].adm.effective_gain(g)?);
+            }
+            let event = &event;
             let candidate = event.patch.apply(previous.state);
             candidate
                 .validate()
                 .map_err(|e| e.context(event.track, event.sample, "state"))?;
-            let state = mapped(
+            let mut state = mapped(
                 self.spec.profile,
-                self.spec.loss_policy,
+                MappingOptions {
+                    loss_policy: self.spec.loss_policy,
+                    approximate_mappings: self.spec.approximate_mappings,
+                    preserve_literal: self.spec.preserve_literal,
+                },
                 event.track,
                 event.sample,
                 candidate,
+                Some(event.patch),
                 &mut diagnostics,
             )?;
+            if self.spec.profile == Profile::Logic && event.sample != 0 {
+                for (field, changed) in [
+                    (
+                        "head_tracking",
+                        state.head_tracking != previous.initial_static.head_tracking,
+                    ),
+                    (
+                        "binaural_mode",
+                        state.binaural_mode != previous.initial_static.binaural_mode,
+                    ),
+                    (
+                        "trim_bypass",
+                        state.trim_bypass != previous.initial_static.trim_bypass,
+                    ),
+                ] {
+                    if changed {
+                        loss(
+                            self.spec.loss_policy,
+                            Some(event.track),
+                            Some(event.sample),
+                            field,
+                            "Logic DBMD cannot retain dynamic channel metadata; keeping its initial value",
+                            &mut diagnostics,
+                        )?;
+                    }
+                }
+                state = previous.initial_static.apply(state);
+            }
             let mut mapped_event = *event;
             if !self.spec.profile.is_adm()
                 && mapped_event.patch.binaural_mode == Some(BinauralMode::Mid)
@@ -417,10 +959,62 @@ impl MasterWriter {
                 mapped_event.patch.binaural_mode = Some(state.binaural_mode);
             }
             if !self.spec.profile.is_adm() && mapped_event.patch.screen_ref.is_some() {
+                if self.spec.approximate_mappings.screen_ref_factor {
+                    mapped_event.patch.screen_factor = Some(state.screen_factor);
+                }
                 mapped_event.patch.screen_ref = None;
             }
+            if self.spec.profile.is_adm() && !self.spec.approximate_mappings.diffuse_decorrelation {
+                mapped_event.patch.decorrelation = None;
+            }
+            if !self.spec.profile.is_adm() {
+                if mapped_event.patch.diffuse.is_some()
+                    && self.spec.approximate_mappings.diffuse_decorrelation
+                {
+                    mapped_event.patch.decorrelation = Some(state.decorrelation);
+                }
+                mapped_event.patch.diffuse = None;
+                mapped_event.patch.divergence = None;
+                mapped_event.patch.channel_lock_distance = None;
+                mapped_event.patch.screen_edge_lock = None;
+            }
+            mapped_event.ramp_samples = mapped_event
+                .patch
+                .has_continuous()
+                .then_some(event.ramp_samples.unwrap_or(0));
+            let mut next_zones = None;
+            if let Some(values) = zones {
+                for z in values {
+                    z.validate()?;
+                }
+                if !values.is_empty() && !self.spec.profile.is_adm() {
+                    loss(
+                        self.spec.loss_policy,
+                        Some(event.track),
+                        Some(event.sample),
+                        "zone",
+                        "Custom ADM zones have no DAMF preset",
+                        &mut diagnostics,
+                    )?;
+                } else {
+                    next_zones = Some(std::sync::Arc::from(values));
+                }
+            }
+            if let Some(z) = &next_zones {
+                previous.custom_zones = std::sync::Arc::clone(z);
+            }
+            if !previous.custom_zones.is_empty() && (state.zone != Zone::All || !state.elevation) {
+                return Err(Error::invalid(
+                    "Custom zone list conflicts with a zone preset",
+                ));
+            }
             previous.update(mapped_event, state);
-            prepared.push((index, mapped_event, state));
+            prepared.push(PreparedObject {
+                index,
+                event: mapped_event,
+                state,
+                zones: next_zones,
+            });
         }
         Ok(Prepared {
             events: prepared,
@@ -429,7 +1023,13 @@ impl MasterWriter {
     }
     /// No validation errors after this point; an I/O failure poisons the whole transaction.
     fn commit(&mut self, prepared: Prepared) -> Result<()> {
-        for (index, event, state) in prepared.events {
+        for PreparedObject {
+            index,
+            event,
+            state,
+            zones,
+        } in prepared.events
+        {
             let track = &mut self.tracks[index];
             let result = if self.spec.profile.is_adm() {
                 track
@@ -447,6 +1047,9 @@ impl MasterWriter {
             if let Err(error) = result {
                 self.failed = true;
                 return Err(error);
+            }
+            if let Some(zones) = zones {
+                track.timeline.custom_zones = zones;
             }
             track.timeline.update(event, state);
         }
@@ -526,6 +1129,7 @@ impl MasterWriter {
             .tracks
             .iter()
             .any(|t| t.timeline.last_event >= self.frames)
+            || self.beds.iter().any(|b| b.last_event >= self.frames)
         {
             return Err(Error::invalid(
                 "Scheduled metadata lies beyond the PCM duration",
@@ -539,6 +1143,72 @@ impl MasterWriter {
             }
             track.spool.flush()?;
         }
+        for (channel, bed) in self.beds.iter_mut().enumerate() {
+            if self.spec.profile.is_adm()
+                && bed.number != 0
+                && self.spec.bed_blocks[channel].is_none()
+            {
+                let object = self.spec.bed_timing.unwrap_or_default();
+                let end = self.frames.min(object.end().unwrap_or(u64::MAX));
+                if end <= bed.last_event {
+                    return Err(Error::invalid("Bed event lies outside its object duration"));
+                }
+                let b = metadata::bed_state_block(
+                    &self.spec,
+                    channel,
+                    bed.state,
+                    AdmTiming {
+                        start: Some(bed.last_event - object.start.unwrap_or(0)),
+                        duration: Some(end - bed.last_event),
+                    },
+                );
+                bed.number = bed
+                    .number
+                    .checked_add(1)
+                    .ok_or_else(|| Error::invalid("Too many bed blocks"))?;
+                metadata::write_adm_bed_block(
+                    &mut bed.spool,
+                    &b,
+                    bed.number,
+                    self.spec.sample_rate,
+                    self.spec.profile,
+                )?;
+            } else if !self.spec.profile.is_adm()
+                && let Some(stop) = bed.end
+                && stop < self.frames
+                && stop >= bed.last_event
+            {
+                bed.spool.write_all(
+                    metadata::damf_bed_event(
+                        channel as u32,
+                        stop,
+                        BedPatch {
+                            active: Some(false),
+                            ..Default::default()
+                        },
+                        None,
+                    )?
+                    .as_bytes(),
+                )?;
+            }
+            bed.spool.flush()?;
+        }
+        if self
+            .spec
+            .container_metadata
+            .as_ref()
+            .is_some_and(|m| !m.matches(&self.spec, Some(self.frames)))
+        {
+            loss(
+                self.spec.loss_policy,
+                None,
+                None,
+                "container_metadata",
+                "Ancillary metadata cannot be retained after changing the audio duration",
+                &mut self.diagnostics,
+            )?;
+            self.spec.container_metadata = None;
+        }
         let mut axml_bytes = 0;
         let mut dbmd_bytes = 0;
         match self
@@ -549,24 +1219,43 @@ impl MasterWriter {
             Audio::Bwf(writer) => {
                 let axml_path = self.temp.join("axml.tmp");
                 let mut axml = BufWriter::new(File::create(&axml_path)?);
-                metadata::write_axml(&mut axml, &self.spec, self.frames, |i, out| {
-                    std::io::copy(
-                        &mut BufReader::new(File::open(self.temp.join(format!("track-{i}.tmp")))?),
-                        out,
-                    )?;
-                    Ok(())
-                })?;
+                metadata::write_axml_with_beds(
+                    &mut axml,
+                    &self.spec,
+                    self.frames,
+                    |i, out| {
+                        if self.beds[i].number == 0 {
+                            return Ok(false);
+                        }
+                        std::io::copy(
+                            &mut BufReader::new(File::open(
+                                self.temp.join(format!("bed-{i}.tmp")),
+                            )?),
+                            out,
+                        )?;
+                        Ok(true)
+                    },
+                    |i, out| {
+                        std::io::copy(
+                            &mut BufReader::new(File::open(
+                                self.temp.join(format!("track-{i}.tmp")),
+                            )?),
+                            out,
+                        )?;
+                        Ok(())
+                    },
+                )?;
                 axml.flush()?;
                 axml_bytes = axml.stream_position()?;
                 drop(axml);
                 let dbmd = if self.spec.profile == Profile::Logic {
-                    dbmd::build_logic_dbmd(
-                        self.spec.channels(),
-                        self.spec.frame_rate,
-                        &self.spec.dbmd_originator,
-                        &self.spec.dbmd_product,
-                    )
-                    .map_err(Error::invalid)?
+                    let channels: Vec<_> = self
+                        .beds
+                        .iter()
+                        .map(|b| b.initial_static)
+                        .chain(self.tracks.iter().map(|t| t.timeline.initial_static))
+                        .collect();
+                    dbmd::build_from_spec(&self.spec, &channels)?
                 } else {
                     Vec::new()
                 };
@@ -583,6 +1272,23 @@ impl MasterWriter {
                         id: *b"dbmd",
                         size: dbmd.len() as u64,
                         source: &mut dbmd_source,
+                    });
+                }
+                let metadata = self.spec.container_metadata.as_ref();
+                let mut sources: Vec<_> = metadata
+                    .into_iter()
+                    .flat_map(|m| &m.chunks)
+                    .map(|c| std::io::Cursor::new(&c.data))
+                    .collect();
+                for (chunk, source) in metadata
+                    .into_iter()
+                    .flat_map(|m| &m.chunks)
+                    .zip(&mut sources)
+                {
+                    chunks.push(TrailingChunk {
+                        id: chunk.id,
+                        size: chunk.data.len() as u64,
+                        source,
                     });
                 }
                 let mut file = writer.finish_with_chunks(&mut chunks)?;
@@ -602,6 +1308,14 @@ impl MasterWriter {
                         .ok_or_else(|| Error::invalid("CAF size overflow"))?,
                 )
                 .map_err(|_| Error::invalid("CAF size exceeds i64"))?;
+                if let Some(metadata) = &self.spec.container_metadata {
+                    file.seek(SeekFrom::End(0))?;
+                    for chunk in &metadata.chunks {
+                        file.write_all(&chunk.id)?;
+                        file.write_all(&(chunk.data.len() as i64).to_be_bytes())?;
+                        file.write_all(&chunk.data)?;
+                    }
+                }
                 file.seek(SeekFrom::Start(56))?;
                 file.write_all(&size.to_be_bytes())?;
                 file.flush()?;
@@ -615,7 +1329,12 @@ impl MasterWriter {
                     "sampleRate: {}\nevents:",
                     self.spec.sample_rate
                 )?;
-                metadata_file.write_all(metadata::damf_bed_events().as_bytes())?;
+                for i in 0..BED_CHANNELS {
+                    std::io::copy(
+                        &mut BufReader::new(File::open(self.temp.join(format!("bed-{i}.tmp")))?),
+                        &mut metadata_file,
+                    )?;
+                }
                 for i in 0..self.tracks.len() {
                     std::io::copy(
                         &mut BufReader::new(File::open(self.temp.join(format!("track-{i}.tmp")))?),
@@ -632,6 +1351,7 @@ impl MasterWriter {
             }
         }
         self.tracks.clear();
+        self.beds.clear();
         for entry in fs::read_dir(&self.temp)? {
             let path = entry?.path();
             if path.extension().is_some_and(|x| x == "tmp") {
@@ -689,8 +1409,18 @@ impl Staged {
     }
 }
 
+struct PreparedObject {
+    index: usize,
+    event: ObjectUpdate,
+    state: ObjectState,
+    zones: Option<std::sync::Arc<[ExclusionZone]>>,
+}
 struct Prepared {
-    events: Vec<(usize, ObjectUpdate, ObjectState)>,
+    events: Vec<PreparedObject>,
+    diagnostics: Vec<MappingDiagnostic>,
+}
+struct PreparedBeds {
+    events: Vec<(BedUpdate, BedState, Option<Gain>)>,
     diagnostics: Vec<MappingDiagnostic>,
 }
 
@@ -802,6 +1532,30 @@ impl MultiWriter {
         self.ready()?;
         let prepared = self.prepare(updates)?;
         self.commit(prepared)
+    }
+    pub fn schedule_native_updates(&mut self, updates: &[NativeObjectUpdate]) -> Result<()> {
+        self.ready()?;
+        let prepared = self
+            .writers
+            .iter()
+            .map(|w| w.prepare_native(updates))
+            .collect::<Result<_>>()?;
+        self.commit(prepared)
+    }
+    pub fn schedule_bed_updates(&mut self, updates: &[BedUpdate]) -> Result<()> {
+        self.ready()?;
+        let prepared = self
+            .writers
+            .iter()
+            .map(|w| w.prepare_beds(updates))
+            .collect::<Result<Vec<_>>>()?;
+        for (writer, events) in self.writers.iter_mut().zip(prepared) {
+            if let Err(error) = writer.commit_beds(events) {
+                self.poison();
+                return Err(error);
+            }
+        }
+        Ok(())
     }
     pub fn write_block(&mut self, pcm: PcmBlock<'_>, updates: &[ObjectUpdate]) -> Result<()> {
         self.ready()?;
@@ -920,7 +1674,7 @@ fn loss(
     track: Option<TrackId>,
     sample: Option<u64>,
     field: &'static str,
-    message: &'static str,
+    message: &str,
     diagnostics: &mut Vec<MappingDiagnostic>,
 ) -> Result<()> {
     if policy == LossPolicy::Reject {
@@ -930,11 +1684,14 @@ fn loss(
         error.field = Some(field);
         return Err(error);
     }
-    if !diagnostics
-        .iter()
-        .any(|d| d.track == track && d.field == field)
-    {
+    if !diagnostics.iter().any(|d| {
+        d.kind == MappingDiagnosticKind::Loss
+            && d.track == track
+            && d.field == field
+            && d.message == message
+    }) {
         diagnostics.push(MappingDiagnostic {
+            kind: MappingDiagnosticKind::Loss,
             track,
             sample,
             field,
@@ -943,32 +1700,169 @@ fn loss(
     }
     Ok(())
 }
+fn literal(
+    diagnostics: &mut Vec<MappingDiagnostic>,
+    track: Option<TrackId>,
+    sample: u64,
+    field: &'static str,
+    message: &str,
+) {
+    if !diagnostics.iter().any(|d| {
+        d.kind == MappingDiagnosticKind::PreservedLiteral
+            && d.track == track
+            && d.field == field
+            && d.message == message
+    }) {
+        diagnostics.push(MappingDiagnostic {
+            kind: MappingDiagnosticKind::PreservedLiteral,
+            track,
+            sample: Some(sample),
+            field,
+            message: message.into(),
+        });
+    }
+}
 fn mapped(
     profile: Profile,
-    policy: LossPolicy,
+    options: MappingOptions,
     id: TrackId,
     sample: u64,
     mut state: ObjectState,
+    patch: Option<ObjectPatch>,
     diagnostics: &mut Vec<MappingDiagnostic>,
 ) -> Result<ObjectState> {
     state.validate()?;
+    let policy = options.loss_policy;
+    let approximations = options.approximate_mappings;
+    if !profile.is_adm()
+        && options.preserve_literal.damf_mid
+        && state.binaural_mode == BinauralMode::Mid
+    {
+        literal(
+            diagnostics,
+            Some(id),
+            sample,
+            "binaural_mode",
+            "Writing literal DAMF mid; Dolby Conversion Tool 2.1.2 rejects this value",
+        );
+    } else if profile != Profile::Standard && state.binaural_mode == BinauralMode::Mid {
+        loss(
+            policy,
+            Some(id),
+            Some(sample),
+            "binaural_mode",
+            "Mid has no verified encoding; using undefined",
+            diagnostics,
+        )?;
+        state.binaural_mode = BinauralMode::Undefined;
+    }
     if profile.is_adm() {
+        if let Some(divergence) = &mut state.divergence
+            && divergence.azimuth_range.is_some()
+        {
+            if options.preserve_literal.cartesian_azimuth_range {
+                literal(
+                    diagnostics,
+                    Some(id),
+                    sample,
+                    "divergence_azimuth_range",
+                    "Writing legacy azimuthRange verbatim on a Cartesian block; BS.2076-2 specifies positionRange here",
+                );
+            } else {
+                divergence.azimuth_range = None;
+                loss(
+                    policy,
+                    Some(id),
+                    Some(sample),
+                    "divergence_azimuth_range",
+                    "azimuthRange has no Cartesian ADM mapping; keeping the divergence value",
+                    diagnostics,
+                )?;
+            }
+        }
+        if approximations.diffuse_decorrelation
+            && let Some(value) = patch
+                .and_then(|p| p.decorrelation)
+                .or((state.decorrelation != 0.).then_some(state.decorrelation))
+        {
+            let native = patch.map_or((state.diffuse != 0.).then_some(state.diffuse), |p| {
+                p.diffuse
+            });
+            if native.is_some_and(|v| v != value) {
+                loss(
+                    policy,
+                    Some(id),
+                    Some(sample),
+                    "decorrelation",
+                    "Approximate decorr conflicts with explicit diffuse; keeping diffuse",
+                    diagnostics,
+                )?;
+            } else {
+                state.diffuse = value;
+                record_approximation(
+                    diagnostics,
+                    id,
+                    sample,
+                    "decorrelation",
+                    format!(
+                        "Approximate decorr {value} -> diffuse {value}: numeric copy as discrete updates; rendering equivalence is not guaranteed"
+                    ),
+                );
+            }
+            state.decorrelation = 0.;
+        }
+        if approximations.screen_ref_factor
+            && let Some(value) = patch
+                .and_then(|p| p.screen_factor)
+                .or((state.screen_factor != 0.).then_some(state.screen_factor))
+        {
+            let screen_ref = value != 0.;
+            if patch
+                .and_then(|p| p.screen_ref)
+                .is_some_and(|native| native != screen_ref)
+            {
+                loss(
+                    policy,
+                    Some(id),
+                    Some(sample),
+                    "screen_factor",
+                    "Approximate screenFactor conflicts with explicit screenRef; keeping screenRef",
+                    diagnostics,
+                )?;
+            } else {
+                state.screen_ref = screen_ref;
+                record_approximation(
+                    diagnostics,
+                    id,
+                    sample,
+                    "screen_factor",
+                    format!(
+                        "Approximate screenFactor {value} -> screenRef {screen_ref}: nonzero becomes true; continuous factor is not retained"
+                    ),
+                );
+            }
+            state.screen_factor = 0.;
+        }
         for (field, lost) in [
-            ("elevation", !state.elevation),
-            ("zone", state.zone != Zone::All),
-            ("trim_bypass", state.trim_bypass),
+            (
+                "trim_bypass",
+                profile == Profile::Standard && state.trim_bypass,
+            ),
             ("screen_factor", state.screen_factor != 0.),
             ("depth_factor", state.depth_factor != 0.),
-            ("decorrelation", state.decorrelation != 0.),
+            (
+                "decorrelation",
+                state.decorrelation != 0. && !approximations.diffuse_decorrelation,
+            ),
             ("dialog", state.dialog != -1),
             ("music", state.music != -1),
             (
                 "head_tracking",
-                state.head_tracking != HeadTracking::SceneRelative,
+                profile == Profile::Standard && state.head_tracking == HeadTracking::Undefined,
             ),
             (
                 "binaural_mode",
-                state.binaural_mode != BinauralMode::Undefined,
+                profile == Profile::Standard && state.binaural_mode != BinauralMode::Undefined,
             ),
             (
                 "importance",
@@ -987,39 +1881,247 @@ fn mapped(
             }
         }
         state.importance = (state.importance * 10.).round() / 10.;
-        state.screen_ref |= state.screen_factor != 0.;
-        state.elevation = true;
-        state.zone = Zone::All;
-        state.trim_bypass = false;
         state.screen_factor = 0.;
         state.depth_factor = 0.;
         state.decorrelation = 0.;
         state.dialog = -1;
         state.music = -1;
-        state.head_tracking = HeadTracking::SceneRelative;
-        state.binaural_mode = BinauralMode::Undefined;
-    } else {
-        if state.binaural_mode == BinauralMode::Mid {
-            loss(
-                policy,
-                Some(id),
-                Some(sample),
-                "binaural_mode",
-                "Mid is not supported by the verified DAMF profile; using undefined",
-                diagnostics,
-            )?;
+        if profile == Profile::Standard {
+            state.trim_bypass = false;
+            if state.head_tracking == HeadTracking::Undefined {
+                state.head_tracking = HeadTracking::SceneRelative;
+            }
             state.binaural_mode = BinauralMode::Undefined;
         }
-        if state.screen_ref {
+    } else {
+        if let Some(value) = patch
+            .and_then(|p| p.diffuse)
+            .or((state.diffuse != 0.).then_some(state.diffuse))
+        {
+            if approximations.diffuse_decorrelation {
+                let native = patch.map_or(
+                    (state.decorrelation != 0.).then_some(state.decorrelation),
+                    |p| p.decorrelation,
+                );
+                if native.is_some_and(|v| v != value) {
+                    loss(
+                        policy,
+                        Some(id),
+                        Some(sample),
+                        "diffuse",
+                        "Approximate diffuse conflicts with explicit decorr; keeping decorr",
+                        diagnostics,
+                    )?;
+                } else {
+                    state.decorrelation = value;
+                    record_approximation(
+                        diagnostics,
+                        id,
+                        sample,
+                        "diffuse",
+                        format!(
+                            "Approximate diffuse {value} -> decorr {value}: numeric copy as discrete updates; rendering equivalence is not guaranteed"
+                        ),
+                    );
+                }
+            } else if value != 0. {
+                loss(
+                    policy,
+                    Some(id),
+                    Some(sample),
+                    "diffuse",
+                    "Native diffuse has no DAMF mapping",
+                    diagnostics,
+                )?;
+            }
+        }
+        for (field, lost) in [
+            ("divergence", state.divergence.is_some()),
+            (
+                "channel_lock_distance",
+                state.channel_lock_distance.is_some(),
+            ),
+            (
+                "screen_edge_lock",
+                state.screen_edge_lock.iter().any(Option::is_some),
+            ),
+        ] {
+            if lost {
+                loss(
+                    policy,
+                    Some(id),
+                    Some(sample),
+                    field,
+                    "Native ADM block property has no DAMF mapping",
+                    diagnostics,
+                )?;
+            }
+        }
+        if state.headphone_virtualise.is_some() {
             loss(
                 policy,
                 Some(id),
                 Some(sample),
-                "screen_ref",
-                "ADM screenRef has no exact DAMF screenFactor mapping",
+                "headphone_virtualise",
+                "ADM headphoneVirtualise has no DAMF mapping",
                 diagnostics,
             )?;
+            state.headphone_virtualise = None;
+        }
+        state.diffuse = 0.;
+        state.divergence = None;
+        state.channel_lock_distance = None;
+        state.screen_edge_lock = [None; 3];
+        if let Some(value) = patch
+            .and_then(|p| p.screen_ref)
+            .or(state.screen_ref.then_some(true))
+        {
+            if approximations.screen_ref_factor {
+                let factor = if value { 1. } else { 0. };
+                let native = match patch {
+                    Some(p) => p.screen_factor,
+                    None => (state.screen_factor != 0.).then_some(state.screen_factor),
+                };
+                if native.is_some_and(|native| native != factor) {
+                    loss(
+                        policy,
+                        Some(id),
+                        Some(sample),
+                        "screen_ref",
+                        "Approximate screenRef conflicts with explicit screenFactor; keeping screenFactor",
+                        diagnostics,
+                    )?;
+                } else {
+                    state.screen_factor = factor;
+                    record_approximation(
+                        diagnostics,
+                        id,
+                        sample,
+                        "screen_ref",
+                        format!(
+                            "Approximate screenRef {value} -> screenFactor {factor}: boolean becomes 0 or 1; rendering equivalence is not guaranteed"
+                        ),
+                    );
+                }
+            } else if value {
+                loss(
+                    policy,
+                    Some(id),
+                    Some(sample),
+                    "screen_ref",
+                    "ADM screenRef has no exact DAMF screenFactor mapping",
+                    diagnostics,
+                )?;
+            }
             state.screen_ref = false;
+        }
+    }
+    Ok(state)
+}
+
+fn mapped_bed(
+    profile: Profile,
+    policy: LossPolicy,
+    preserve: LiteralPreservation,
+    channel: usize,
+    sample: u64,
+    mut state: BedState,
+    diagnostics: &mut Vec<MappingDiagnostic>,
+) -> Result<BedState> {
+    state.validate()?;
+    let default = BedState::for_channel(channel);
+    if !profile.is_adm() && preserve.damf_mid && state.binaural_mode == BinauralMode::Mid {
+        literal(
+            diagnostics,
+            None,
+            sample,
+            "bed_binaural_mode",
+            &format!(
+                "Writing literal mid on bed {}; Dolby Conversion Tool 2.1.2 rejects mid",
+                BED_LABELS[channel]
+            ),
+        );
+    } else if state.binaural_mode == BinauralMode::Mid {
+        loss(
+            policy,
+            None,
+            Some(sample),
+            "bed_binaural_mode",
+            &format!(
+                "Bed {} Mid mode has no verified encoding; using the default",
+                BED_LABELS[channel]
+            ),
+            diagnostics,
+        )?;
+        state.binaural_mode = default.binaural_mode;
+    }
+    if profile.is_adm() {
+        for (field, changed) in [
+            ("bed_active", !state.active),
+            (
+                "bed_importance",
+                (state.importance * 10.).round() / 10. != state.importance,
+            ),
+            ("bed_position", state.rendering.position.is_some()),
+            ("bed_extent", state.rendering.extent.flatten().is_some()),
+            (
+                "bed_zone",
+                state.rendering.zone.is_some_and(|v| v != Zone::All),
+            ),
+            ("bed_snap", state.rendering.snap == Some(true)),
+            ("bed_elevation", state.rendering.elevation == Some(false)),
+            (
+                "bed_decorrelation",
+                state.rendering.decorrelation.is_some_and(|v| v != 0.),
+            ),
+            (
+                "bed_dialog",
+                state.rendering.dialog.is_some_and(|v| v != -1),
+            ),
+            ("bed_music", state.rendering.music.is_some_and(|v| v != -1)),
+            (
+                "bed_screen_factor",
+                state.rendering.screen_factor.is_some_and(|v| v != 0.),
+            ),
+            (
+                "bed_depth_factor",
+                state.rendering.depth_factor.is_some_and(|v| v != 0.),
+            ),
+            (
+                "bed_trim_bypass",
+                profile == Profile::Standard && state.trim_bypass,
+            ),
+            (
+                "bed_binaural_mode",
+                profile == Profile::Standard && state.binaural_mode != default.binaural_mode,
+            ),
+            (
+                "bed_head_tracking",
+                profile == Profile::Standard && state.head_tracking == HeadTracking::Undefined,
+            ),
+        ] {
+            if changed {
+                loss(
+                    policy,
+                    None,
+                    Some(sample),
+                    field,
+                    &format!(
+                        "Bed {} property has no mapping in this ADM profile",
+                        BED_LABELS[channel]
+                    ),
+                    diagnostics,
+                )?;
+            }
+        }
+        state.rendering = BedRendering::default();
+        state.importance = (state.importance * 10.).round() / 10.;
+        if profile == Profile::Standard {
+            state.trim_bypass = false;
+            state.binaural_mode = default.binaural_mode;
+            if state.head_tracking == HeadTracking::Undefined {
+                state.head_tracking = HeadTracking::SceneRelative;
+            }
         }
     }
     Ok(state)

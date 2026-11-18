@@ -4,10 +4,22 @@ use std::ops::Range;
 
 #[derive(Debug)]
 pub(crate) struct Attribute {
+    pub namespace: Option<Box<AttributeBinding>>,
     pub name: String,
     pub value: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct AttributeBinding {
+    pub uri: String,
+    pub value_prefixes: Vec<(String, String)>,
+}
+fn namespace_uri(raw: &[u8]) -> Result<String> {
+    let v = decoded(raw)?;
+    quick_xml::escape::unescape(&v)
+        .map(|s| s.into_owned())
+        .map_err(|e| Error::xml(e.to_string()))
+}
 #[derive(Debug)]
 pub(crate) struct Node {
     pub name: String,
@@ -86,15 +98,43 @@ impl Tree {
                     let mut attributes = Vec::new();
                     for attr in element.attributes() {
                         let attr = attr.map_err(|e| Error::xml(format!("XML attribute: {e}")))?;
+                        let name = decoded(attr.key.as_ref())?;
+                        let value = attr
+                            .decoded_and_normalized_value(
+                                quick_xml::XmlVersion::Implicit1_0,
+                                reader.decoder(),
+                            )
+                            .map_err(|e| Error::xml(e.to_string()))?
+                            .into_owned();
+                        let namespace = if let Some((own, _)) = name.split_once(':')
+                            && own != "xmlns"
+                        {
+                            let uri = match reader.resolver().resolve_attribute(attr.key).0 {
+                                ResolveResult::Bound(uri) => namespace_uri(uri.as_ref())?,
+                                _ => return Err(Error::xml("XML 属性有未绑定的命名空间前缀")),
+                            };
+                            let mut value_prefixes = Vec::new();
+                            if value.contains(':') {
+                                for (prefix, uri) in reader.resolver().bindings() {
+                                    if let quick_xml::name::PrefixDeclaration::Named(p) = prefix {
+                                        let p = decoded(p)?;
+                                        if p != own && value.contains(&format!("{p}:")) {
+                                            value_prefixes.push((p, namespace_uri(uri.as_ref())?));
+                                        }
+                                    }
+                                }
+                            }
+                            Some(Box::new(AttributeBinding {
+                                uri,
+                                value_prefixes,
+                            }))
+                        } else {
+                            None
+                        };
                         attributes.push(Attribute {
-                            name: decoded(attr.key.as_ref())?,
-                            value: attr
-                                .decoded_and_normalized_value(
-                                    quick_xml::XmlVersion::Implicit1_0,
-                                    reader.decoder(),
-                                )
-                                .map_err(|e| Error::xml(e.to_string()))?
-                                .into_owned(),
+                            namespace,
+                            name,
+                            value,
                         });
                     }
                     let index = tree.nodes.len();

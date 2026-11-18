@@ -80,13 +80,19 @@ impl Snapshot {
                 "Cartesian referenceScreen 需要 screenWidth X",
             ));
         }
+        let attribute_ratio = doc.node(key).attr("aspectRatio").map(number).transpose()?;
+        let child_ratio = doc.text(key, "aspectRatio").map(number).transpose()?;
+        if attribute_ratio
+            .zip(child_ratio)
+            .is_some_and(|(a, b)| a != b)
+        {
+            return Err(Error::invalid(
+                "referenceScreen 的两种 aspectRatio 写法冲突",
+            ));
+        }
         let mut result = AdmScreen {
             cartesian: u32::from(cartesian),
-            aspect_ratio: doc
-                .text(key, "aspectRatio")
-                .map(number)
-                .transpose()?
-                .unwrap_or(1.78),
+            aspect_ratio: attribute_ratio.or(child_ratio).unwrap_or(1.78),
             ..AdmScreen::default()
         };
         if cartesian {
@@ -332,7 +338,7 @@ impl Snapshot {
                     },
                 };
                 if let Some((uid, pack)) =
-                    uid.and_then(|u| doc.reference(u, "audioPackFormatIDRef").map(|p| (u, p)))
+                    uid.and_then(|u| doc.pack_for_track(key, u).map(|p| (u, p)))
                 {
                     let channels = doc
                         .channel(uid)

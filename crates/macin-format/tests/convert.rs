@@ -485,6 +485,147 @@ fn convert_reads_adm_as_well_as_damf() {
 }
 
 #[test]
+fn convert_requires_each_approximation_and_reports_it_separately() {
+    let dir = Scratch::new();
+    let original = adm(&dir.0);
+    let source = dir.path("fields.wav");
+    let mut reader = macin_bwf::ChunkReader::new(std::fs::File::open(&original).unwrap()).unwrap();
+    let mut xml = String::from_utf8(reader.metadata(*b"axml", 1 << 20).unwrap().unwrap()).unwrap();
+    let channel = xml
+        .find("<audioChannelFormat audioChannelFormatID=\"AC_00031001\"")
+        .unwrap();
+    let end = channel + xml[channel..].find("</audioBlockFormat>").unwrap();
+    xml.insert_str(end, "<diffuse>0.5</diffuse><screenRef>1</screenRef>");
+    macin_bwf::replace_chunk(
+        reader.into_inner(),
+        std::fs::File::create(&source).unwrap(),
+        *b"axml",
+        xml.as_bytes(),
+    )
+    .unwrap();
+    for (index, choice, missing) in [
+        (0, "diffuse-decorrelation", "screen_ref"),
+        (1, "screen-ref-factor", "diffuse"),
+    ] {
+        let target = dir.path(&format!("rejected-{index}"));
+        let result = mfadm(&[
+            "convert".as_ref(),
+            source.as_os_str(),
+            &to("home", &target),
+            "--approximate".as_ref(),
+            choice.as_ref(),
+        ]);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr).contains(missing));
+        assert!(!target.exists());
+    }
+    let target = dir.path("home");
+    let result = mfadm(&[
+        "convert".as_ref(),
+        source.as_os_str(),
+        &to("home", &target),
+        "--approximate".as_ref(),
+        "diffuse-decorrelation".as_ref(),
+        "--approximate".as_ref(),
+        "screen-ref-factor".as_ref(),
+        "--json".as_ref(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["read_losses"], serde_json::json!([]));
+    assert_eq!(report["outputs"][0]["losses"][0]["field"], "diffuse");
+    assert_eq!(report["outputs"][0]["losses"][0]["kind"], "approximation");
+    assert_eq!(report["outputs"][0]["losses"][1]["field"], "screen_ref");
+    let reader = macin_atmos::damf::DamfReader::open(
+        target.join("master.atmos"),
+        macin_atmos::LossPolicy::Reject,
+    )
+    .unwrap();
+    assert_eq!(reader.spec().objects[0].initial.decorrelation, 0.5);
+    assert_eq!(reader.spec().objects[0].initial.screen_factor, 1.);
+    let target = dir.path("text");
+    let result = mfadm(&[
+        "convert".as_ref(),
+        source.as_os_str(),
+        &to("home", &target),
+        "--approximate".as_ref(),
+        "diffuse-decorrelation".as_ref(),
+        "--approximate".as_ref(),
+        "screen-ref-factor".as_ref(),
+    ]);
+    assert!(result.status.success());
+    let text = String::from_utf8(result.stdout).unwrap();
+    assert!(text.contains("approximate diffuse"), "{text}");
+    assert!(text.contains("approximate screen_ref"), "{text}");
+    assert!(!text.contains("lost "), "{text}");
+}
+
+#[test]
+fn unknown_approximation_is_a_usage_error() {
+    let result = mfadm(&[
+        "convert".as_ref(),
+        "unused.wav".as_ref(),
+        "--to=home=unused".as_ref(),
+        "--approximate".as_ref(),
+        "all".as_ref(),
+    ]);
+    assert_eq!(result.status.code(), Some(2));
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("diffuse-decorrelation"), "{message}");
+    assert!(message.contains("screen-ref-factor"), "{message}");
+}
+
+#[test]
+fn convert_reports_and_preserves_bed_updates() {
+    let dir = Scratch::new();
+    let source = dir.path("bed-source");
+    let spec = MasterSpec {
+        profile: Profile::DamfHome,
+        objects: vec![ObjectSpec::new(TrackId(1), "Voice")],
+        ..Default::default()
+    };
+    let mut writer = MasterWriter::create(&source, spec).unwrap();
+    writer
+        .schedule_bed_updates(&[macin_atmos::BedUpdate {
+            channel: 0,
+            sample: 1200,
+            ramp_samples: Some(600),
+            patch: macin_atmos::BedPatch {
+                gain: Some(macin_atmos::Gain::Decibels(-3.)),
+                ..Default::default()
+            },
+        }])
+        .unwrap();
+    writer
+        .write_block(PcmBlock::F32Interleaved(&vec![0.125; 4800 * 11]), &[])
+        .unwrap();
+    writer.finish().unwrap();
+    let target = dir.path("bed-copy");
+    let output = mfadm(&[
+        "convert".as_ref(),
+        source.join("master.atmos").as_os_str(),
+        &to("home", &target),
+        "--json".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["updates"], 0);
+    assert_eq!(report["bed_updates"], 1);
+    assert_eq!(
+        std::fs::read(source.join("master.atmos.metadata")).unwrap(),
+        std::fs::read(target.join("master.atmos.metadata")).unwrap()
+    );
+}
+
+#[test]
 fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
     let dir = Scratch::new();
     let source = adm(&dir.0);
@@ -513,13 +654,7 @@ fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
         &to("standard", &adm_path),
         "--json".as_ref(),
     ];
-    let rejected = mfadm(&args);
-    assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("bed_timing"));
-    assert!(!damf_path.exists() && !adm_path.exists());
-    let mut allowed = args.to_vec();
-    allowed.push("--allow-loss".as_ref());
-    let output = mfadm(&allowed);
+    let output = mfadm(&args);
     assert!(
         output.status.success(),
         "{}",
@@ -527,13 +662,24 @@ fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["updates"], 2);
-    assert_eq!(report["read_losses"][0]["field"], "bed_timing");
+    assert_eq!(report["read_losses"], serde_json::json!([]));
     assert_eq!(report["outputs"][0]["frames"], 9600);
     let damf = macin_atmos::damf::DamfReader::open(
         damf_path.join("master.atmos"),
         macin_atmos::LossPolicy::Reject,
     )
     .unwrap();
+    let bed_events = damf
+        .bed_updates()
+        .unwrap()
+        .collect::<macin_atmos::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(bed_events.len(), 10);
+    assert!(
+        bed_events
+            .iter()
+            .all(|e| e.sample == 4800 && e.patch.active == Some(false))
+    );
     let last = damf.updates().unwrap().last().unwrap().unwrap();
     assert_eq!((last.sample, last.patch.active), (4800, Some(false)));
     let adm = macin_atmos::adm::AdmReader::open(adm_path, macin_atmos::LossPolicy::Reject).unwrap();
@@ -542,5 +688,83 @@ fn adm_replacement_audio_retains_object_end_and_reports_bed_extension() {
             .unwrap()
             .map(Result::unwrap)
             .any(|u| u.sample == 4800 && u.patch.gain == Some(macin_atmos::Gain::Linear(0.)))
+    );
+}
+
+#[test]
+fn literal_preservation_is_per_field_and_reports_the_nonportable_value() {
+    let dir = Scratch::new();
+    let mut s = MasterSpec {
+        objects: vec![ObjectSpec::new(TrackId(1), "Voice")],
+        ..Default::default()
+    };
+    s.objects[0].initial.divergence = Some(macin_atmos::ObjectDivergence {
+        value: 0.4,
+        position_range: None,
+        azimuth_range: Some(30.),
+    });
+    s.preserve_literal.cartesian_azimuth_range = true;
+    let legacy = dir.path("old.wav");
+    let mut w = MasterWriter::create(&legacy, s).unwrap();
+    w.write_block(PcmBlock::S24Le(&[0; 33 * 4]), &[]).unwrap();
+    w.finish().unwrap();
+    let dst = dir.path("copy.wav");
+    let to_adm = to("standard", &dst);
+    let fail = mfadm(&[
+        "convert".as_ref(),
+        legacy.as_os_str(),
+        &to_adm,
+        "--preserve-literal".as_ref(),
+        "damf-mid".as_ref(),
+    ]);
+    assert_eq!(fail.status.code(), Some(1));
+    assert!(!dst.exists());
+    let saved = mfadm(&[
+        "convert".as_ref(),
+        legacy.as_os_str(),
+        &to_adm,
+        "--preserve-literal".as_ref(),
+        "cartesian-azimuth-range".as_ref(),
+        "--json".as_ref(),
+    ]);
+    assert!(saved.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&saved.stdout).unwrap();
+    assert_eq!(report["read_losses"], serde_json::json!([]));
+    assert_eq!(
+        report["outputs"][0]["losses"][0]["kind"],
+        "preserved_literal"
+    );
+    assert_eq!(
+        macin_atmos::adm::AdmReader::open(dst, macin_atmos::LossPolicy::Reject)
+            .unwrap()
+            .spec()
+            .objects[0]
+            .initial
+            .divergence
+            .unwrap()
+            .azimuth_range,
+        Some(30.)
+    );
+    let manifest = damf(&dir.0);
+    let meta = manifest.with_extension("atmos.metadata");
+    let yaml = std::fs::read_to_string(&meta)
+        .unwrap()
+        .replace("binauralRenderMode: near", "binauralRenderMode: mid");
+    std::fs::write(meta, yaml).unwrap();
+    let out = dir.path("home");
+    let dest = to("home", &out);
+    let saved = mfadm(&[
+        "convert".as_ref(),
+        manifest.as_os_str(),
+        &dest,
+        "--preserve-literal".as_ref(),
+        "damf-mid".as_ref(),
+    ]);
+    assert!(saved.status.success());
+    assert!(String::from_utf8_lossy(&saved.stdout).contains("preserved binaural_mode"));
+    assert!(
+        std::fs::read_to_string(out.join("master.atmos.metadata"))
+            .unwrap()
+            .contains("binauralRenderMode: mid")
     );
 }

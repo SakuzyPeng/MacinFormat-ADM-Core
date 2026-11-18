@@ -16,6 +16,13 @@ pub struct TrackUidDefinition {
     pub pack_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct QualifiedAttribute<'a> {
+    pub name: &'a str,
+    pub namespace: &'a str,
+    pub value: &'a str,
+    pub value_prefixes: &'a [(String, String)],
+}
 #[derive(Debug)]
 pub struct Document {
     pub(crate) xml: Tree,
@@ -240,6 +247,7 @@ impl Document {
                     local: "audioTrackUID".to_owned(),
                     namespace: parent.namespace.clone(),
                     attributes: vec![Attribute {
+                        namespace: None,
                         name: "UID".to_owned(),
                         value: uid.clone(),
                     }],
@@ -304,6 +312,38 @@ impl Document {
     pub fn element_attribute(&self, node: u32, name: &str) -> Option<&str> {
         self.checked(node).and_then(|n| n.attr(name))
     }
+    /// 原始限定属性名和值，供格式适配器检查未映射属性；不修改节点记录布局。
+    pub fn element_attributes(&self, node: u32) -> Vec<(&str, &str)> {
+        self.checked(node).map_or_else(Vec::new, |n| {
+            n.attributes
+                .iter()
+                .map(|a| (a.name.as_str(), a.value.as_str()))
+                .collect()
+        })
+    }
+    /// 限定名、解析后的命名空间 URI、属性值。包含从祖先元素继承的前缀绑定。
+    pub fn qualified_attributes(&self, node: u32) -> Vec<QualifiedAttribute<'_>> {
+        self.checked(node)
+            .into_iter()
+            .flat_map(|n| &n.attributes)
+            .filter_map(|a| {
+                let b = a.namespace.as_ref()?;
+                Some(QualifiedAttribute {
+                    name: &a.name,
+                    namespace: &b.uri,
+                    value: &a.value,
+                    value_prefixes: &b.value_prefixes,
+                })
+            })
+            .collect()
+    }
+    /// UID 经 TrackFormat / StreamFormat 引用的节点；直接引用 ChannelFormat 时为 None。
+    pub fn track_format_elements(&self, uid: &str) -> Option<(u32, u32)> {
+        let uid = self.element_by_id(uid)?;
+        let track = self.reference(uid, "audioTrackFormatIDRef")?;
+        let stream = *self.track_streams.get(&track)?;
+        Some((track, stream))
+    }
     /// The text content of element `node`, as written in the document.
     pub fn element_text(&self, node: u32) -> Option<&str> {
         self.checked(node).map(|n| n.text.as_str())
@@ -319,6 +359,20 @@ impl Document {
             return Vec::new();
         }
         self.all_children(node)
+    }
+    /// 其他命名空间中的直接子元素，仅供适配器报告无法保留的扩展。
+    pub fn foreign_child_names(&self, node: u32) -> Vec<&str> {
+        let Some(parent) = self.checked(node) else {
+            return Vec::new();
+        };
+        let nodes = &self.tree(node).nodes;
+        parent
+            .children
+            .iter()
+            .map(|&i| &nodes[i])
+            .filter(|child| child.namespace != parent.namespace)
+            .map(|child| child.name.as_str())
+            .collect()
     }
     /// The element that carries ADM ID `id` (for example `AP_00011001`), in the document or the
     /// common definitions.
@@ -341,6 +395,23 @@ impl Document {
             },
             |channel| vec![channel],
         )
+    }
+    /// 优先使用轨道（含 CHNA）的 pack。若省略，仅接受包含该声道的唯一对象 pack。
+    pub fn pack_for_track(&self, object: u32, uid: u32) -> Option<u32> {
+        if self.element_name(object) != Some("audioObject")
+            || self.element_name(uid) != Some("audioTrackUID")
+        {
+            return None;
+        }
+        self.reference(uid, "audioPackFormatIDRef").or_else(|| {
+            let packs = self.refs(object, "audioPackFormatIDRef");
+            let [pack] = packs.as_slice() else {
+                return None;
+            };
+            self.refs(*pack, "audioChannelFormatIDRef")
+                .contains(&self.channel(uid)?)
+                .then_some(*pack)
+        })
     }
     fn checked(&self, key: u32) -> Option<&Node> {
         self.tree(key).nodes.get((key & !COMMON) as usize)
@@ -510,13 +581,22 @@ impl Document {
                             validate_float_range(&value.text, 0.0, 1.0, &value.local)?
                         }
                         "importance" => validate_float_range(&value.text, 0.0, 10.0, "importance")?,
+                        "channelLock" if channel_type == 3 => {
+                            if let Some(distance) = value.attr("maxDistance") {
+                                // Cartesian 坐标覆盖单位立方体，最远距离是对角线。极坐标保持原有的半径上限。
+                                let cartesian = self.children(block, "position").iter().any(|&p| {
+                                    matches!(self.node(p).attr("coordinate"), Some("X" | "Y" | "Z"))
+                                });
+                                let maximum = if cartesian { 2. * libm::sqrtf(3.) } else { 2. };
+                                validate_float_range(distance, 0., maximum, "maxDistance")?;
+                            }
+                        }
                         _ => {}
                     }
                     let attributes: &[(&str, f32)] = match value.local.as_str() {
                         "objectDivergence" if channel_type == 3 => {
                             &[("azimuthRange", 180.0), ("positionRange", 1.0)]
                         }
-                        "channelLock" if channel_type == 3 => &[("maxDistance", 2.0)],
                         _ => &[],
                     };
                     for &(name, maximum) in attributes {

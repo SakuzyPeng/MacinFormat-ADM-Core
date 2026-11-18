@@ -295,20 +295,13 @@ fn damf_to_adm_matches_writing_the_model_as_adm_directly() {
             target.profile
         );
     }
-    // Headphone policy, zones, trim and dialog have no ADM mapping; under Allow they are reported.
+    // Standard 仍报告不能承载的耳机策略、trim、分类和 decorrelation；区域及原生头锁已接通。
     let fields: Vec<_> = conversion.outputs[0]
         .diagnostics
         .iter()
         .map(|d| d.field)
         .collect();
-    for field in [
-        "binaural_mode",
-        "head_tracking",
-        "zone",
-        "trim_bypass",
-        "dialog",
-        "decorrelation",
-    ] {
+    for field in ["binaural_mode", "trim_bypass", "dialog", "decorrelation"] {
         assert!(fields.contains(&field), "{field} in {fields:?}");
     }
     let error = DamfReader::open(dir.path("src/film.atmos"), LossPolicy::Reject)
@@ -415,6 +408,12 @@ presentations:
   metadata: "mix.atmos.metadata"
   fps: 24
   offset: 0.0
+  bedDistribution: false
+  trimMode:
+    SomeSurroundsNoHeights: {}
+    SomeSurroundsSomeHeights: {}
+    SomeSurroundsManyHeights: {}
+    ManySurroundsNoHeights: {}
   objects:
   - {ID: 13, description: "Second object"}
   - {ID: 0, description: 'First object'}
@@ -608,13 +607,16 @@ fn an_objects_only_master_gets_a_silent_bed() {
             reader.audio().unwrap(),
             &[Target {
                 path: out.clone(),
-                profile: Profile::Standard,
+                profile: Profile::Logic,
             }],
         )
         .unwrap();
     let mut expected = vec![0.; 10];
     expected.push(1. / 8_388_608.);
     assert_eq!(channel_values(&out), expected);
+    let copied = macin_atmos::adm::AdmReader::open(out, LossPolicy::Reject).unwrap();
+    assert!(!copied.spec().bed_distribution_present);
+    assert_eq!(copied.spec().trim_mode, [None; 4]);
 }
 
 fn open_with(metadata: &str, policy: LossPolicy) -> Result<DamfReader> {
@@ -629,11 +631,6 @@ fn rejected(metadata: &str) -> Error {
 #[test]
 fn what_the_model_cannot_hold_follows_the_loss_policy() {
     for (event, field) in [
-        (
-            "{ID: 7, samplePos: 0, binauralRenderMode: near}",
-            "bed_binaural_mode",
-        ),
-        ("{ID: 10, samplePos: 0, gain: -3}", "bed_gain"),
         (
             "{ID: 13, samplePos: 0, objectClass: dialog}",
             "unknown_field",

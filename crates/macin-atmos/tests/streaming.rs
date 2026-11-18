@@ -332,11 +332,15 @@ fn raw_s24_and_float_endpoints_are_explicit() {
 fn strict_mapping_and_explicit_downgrade_report_source() {
     let tmp = Temp::new();
     let mut spec = spec(Profile::Standard, 48_000);
-    spec.objects[0].initial.zone = Zone::NoBack;
+    spec.objects[0].initial.decorrelation = 0.5;
     let error = MasterWriter::create(tmp.path("reject"), spec.clone()).unwrap_err();
     assert_eq!(
         (error.kind, error.track, error.field),
-        (ErrorKind::Unsupported, Some(TrackId(700)), Some("zone"))
+        (
+            ErrorKind::Unsupported,
+            Some(TrackId(700)),
+            Some("decorrelation")
+        )
     );
     assert_eq!(fs::read_dir(&tmp.0).unwrap().count(), 0);
     spec.loss_policy = LossPolicy::Allow;

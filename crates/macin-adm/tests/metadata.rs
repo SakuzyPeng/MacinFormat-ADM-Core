@@ -43,6 +43,21 @@ fn reference_screen_geometry_defaults_and_xml_roundtrip() {
     assert_eq!(screen.centre, [10., 5., 2.]);
     assert_eq!(screen.aspect_ratio, 2.);
     assert_eq!(screen.width, 60.);
+    let attribute_form = polar.replace(
+        "<audioProgrammeReferenceScreen><aspectRatio>2</aspectRatio>",
+        "<audioProgrammeReferenceScreen aspectRatio='2.35'>",
+    );
+    assert_eq!(
+        snapshot(&attribute_form).programmes[0]
+            .screen_geometry
+            .aspect_ratio,
+        2.35
+    );
+    let conflicting = attribute_form.replace(
+        "aspectRatio='2.35'>",
+        "aspectRatio='2.35'><aspectRatio>2</aspectRatio>",
+    );
+    assert!(Snapshot::extract(&Document::parse(&conflicting).unwrap(), 48_000, &[]).is_err());
     assert_eq!(
         Document::parse(&polar)
             .unwrap()

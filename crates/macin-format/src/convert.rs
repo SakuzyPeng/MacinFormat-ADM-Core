@@ -4,7 +4,10 @@
 use crate::{Error, Result};
 use macin_atmos::adm::AdmReader;
 use macin_atmos::damf::DamfReader;
-use macin_atmos::{FrameRate, LossPolicy, MappingDiagnostic, Profile, Target};
+use macin_atmos::{
+    Approximation, FrameRate, LossPolicy, MappingDiagnostic, MappingDiagnosticKind, MappingOptions,
+    Profile, Target,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +61,7 @@ pub fn profile_name(profile: Profile) -> &'static str {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Loss {
+    pub kind: &'static str,
     pub track: Option<u64>,
     pub sample: Option<u64>,
     pub field: &'static str,
@@ -67,6 +71,11 @@ fn losses(diagnostics: &[MappingDiagnostic]) -> Vec<Loss> {
     diagnostics
         .iter()
         .map(|d| Loss {
+            kind: match d.kind {
+                MappingDiagnosticKind::Loss => "loss",
+                MappingDiagnosticKind::Approximation => "approximation",
+                MappingDiagnosticKind::PreservedLiteral => "preserved_literal",
+            },
             track: d.track.map(|t| t.0),
             sample: d.sample,
             field: d.field,
@@ -93,9 +102,29 @@ pub struct ConvertReport {
     pub audio: Option<PathBuf>,
     pub objects: usize,
     pub updates: u64,
-    /// What reading dropped; only nonempty with `--allow-loss`.
+    pub bed_updates: u64,
+    /// 读取损失与显式近似；近似诊断不要求 --allow-loss。
     pub read_losses: Vec<Loss>,
     pub outputs: Vec<Output>,
+}
+
+pub fn parse_approximation(name: &str) -> Result<Approximation> {
+    match name {
+        "diffuse-decorrelation" => Ok(Approximation::DiffuseDecorrelation),
+        "screen-ref-factor" => Ok(Approximation::ScreenRefFactor),
+        _ => Err(Error::msg(format!(
+            "unknown approximation {name:?} (diffuse-decorrelation, screen-ref-factor)"
+        ))),
+    }
+}
+
+/// 转换选项；旧入口继续使用默认关闭的近似映射。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConversionOptions<'a> {
+    pub mapping: MappingOptions,
+    pub frame_rate: Option<FrameRate>,
+    pub dbmd_originator: Option<&'a str>,
+    pub dbmd_product: Option<&'a str>,
 }
 
 /// The frame rate names `--fps` accepts, as DAMF spells them.
@@ -150,8 +179,36 @@ pub fn convert_with_dbmd_identity(
     originator: Option<&str>,
     product: Option<&str>,
 ) -> Result<ConvertReport> {
-    let (spec, updates, conversion) = if is_wave(source)? {
-        let mut reader = AdmReader::open(source, policy)?;
+    convert_with_options(
+        source,
+        audio,
+        targets,
+        ConversionOptions {
+            mapping: MappingOptions {
+                loss_policy: policy,
+                ..Default::default()
+            },
+            frame_rate,
+            dbmd_originator: originator,
+            dbmd_product: product,
+        },
+    )
+}
+
+pub fn convert_with_options(
+    source: &Path,
+    audio: Option<&Path>,
+    targets: &[Target],
+    options: ConversionOptions<'_>,
+) -> Result<ConvertReport> {
+    let ConversionOptions {
+        mapping,
+        frame_rate,
+        dbmd_originator: originator,
+        dbmd_product: product,
+    } = options;
+    let (spec, updates, bed_updates, conversion) = if is_wave(source)? {
+        let mut reader = AdmReader::open_with_options(source, mapping)?;
         if let Some(rate) = frame_rate {
             reader = reader.with_frame_rate(rate);
         }
@@ -166,14 +223,19 @@ pub fn convert_with_dbmd_identity(
         };
         let updates = reader.update_count_for_frames(input.frames());
         let conversion = reader.convert(input, targets)?;
-        (reader.spec().clone(), updates, conversion)
+        (
+            reader.spec().clone(),
+            updates,
+            reader.bed_update_count(),
+            conversion,
+        )
     } else {
         if frame_rate.is_some() {
             return Err(Error::msg(
                 "--fps applies to ADM input; DAMF carries its own frame rate",
             ));
         }
-        let reader = DamfReader::open(source, policy)?;
+        let reader = DamfReader::open_with_options(source, mapping)?;
         let originator = originator
             .unwrap_or(&reader.spec().dbmd_originator)
             .to_owned();
@@ -184,7 +246,12 @@ pub fn convert_with_dbmd_identity(
             None => reader.audio()?,
         };
         let conversion = reader.convert(input, targets)?;
-        (reader.spec().clone(), reader.update_count(), conversion)
+        (
+            reader.spec().clone(),
+            reader.update_count(),
+            reader.bed_update_count(),
+            conversion,
+        )
     };
     Ok(ConvertReport {
         source: source.to_owned(),
@@ -192,6 +259,7 @@ pub fn convert_with_dbmd_identity(
         audio: audio.map(Path::to_owned),
         objects: spec.objects.len(),
         updates,
+        bed_updates,
         read_losses: losses(&conversion.read),
         outputs: targets
             .iter()

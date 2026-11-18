@@ -216,7 +216,7 @@ use macin_atmos::adm::AdmReader;
 use macin_atmos::{FrameRate, LossPolicy, Profile, Result, Target};
 
 fn adm_to_damf() -> Result<()> {
-    // ADM 不带帧率，输出默认 24 fps，需要时自己指定。
+    // 默认从 DBMD 恢复帧率；需要覆盖时显式指定。
     let reader = AdmReader::open("result.wav", LossPolicy::Reject)?.with_frame_rate(FrameRate::Fps25);
     let targets = [
         Target { path: "from-adm-home".into(), profile: Profile::DamfHome },
@@ -258,7 +258,6 @@ object AO_100b "Moving object"  Objects
 $ mfadm convert film/master.atmos --to standard=film.wav --to 3dof=film-3dof --allow-loss
 film/master.atmos (home): 2 objects, 3 updates
 -> film.wav (standard): 96000 frames, 12 channels, 48000 Hz
-   lost head_tracking (track 10, sample 36000): Property has no exact mapping in this ADM profile
    lost binaural_mode (track 10, sample 36000): Property has no exact mapping in this ADM profile
 -> film-3dof (3dof): 96000 frames, 12 channels, 48000 Hz
 ```
@@ -281,12 +280,15 @@ film/master.atmos (home): 2 objects, 3 updates
 ## 支持范围与已知限制
 
 - **默认拒绝损失**：`LossPolicy::Reject` 下，目标配置无法精确表达的语义直接报错并指明字段；
-  只有选 `Allow`（或 `--allow-loss`）才降级，并逐条记入诊断。见[语义损失与诊断](docs/REFERENCE.md#语义损失与诊断)。
+  可用 `--approximate` 按字段授权近似，其余降级仍需 `Allow`（或 `--allow-loss`），两者均记入诊断。
+  见[语义损失与诊断](docs/REFERENCE.md#语义损失与诊断)。
 - **母版只有一种形状**：固定 7.1.2 bed 加最多 118 个对象，48/96 kHz、24-bit；不做多 bed 制作和重采样。
 - **读取只支持 Atmos 子集**：一个 programme、至多一个 7.1.2 bed、单轨 Cartesian 对象。极坐标、HOA、多 bed、
   嵌套对象与多个 presentation 直接拒绝。逐项清单见 [DAMF 读取](docs/REFERENCE.md#damf-读取与转换) 与
   [ADM 读取](docs/REFERENCE.md#adm-读取与转换)。通用的 `Document` / `Snapshot` 解析不受此限。
-- **ADM 不带帧率**：ADM 来源转出时默认 24 fps，需要时用 `with_frame_rate` 或 `--fps` 指定。
+- **原生映射**：ADM 可保留对象参数、bed 分段及轨道扩展属性。DAMF 可保留 bed 状态和渲染事件。兼容性受限的原值可用 `--preserve-literal` 逐项选择。
+  具体范围与限制见[格式参考](docs/REFERENCE.md#原生-adm-元数据与容器保留)。
+- **帧率**：从可识别 DBMD 恢复；未提供时默认 24 fps，可用 `with_frame_rate` 或 `--fps` 覆盖。
 - **原子提交，不覆盖**：写入完成才发布，已存在的目标不会被覆盖；`MultiWriter` 发布失败会撤回已发布的部分，
   但挡不住进程恰好在两次 rename 之间崩溃。
 - 不做渲染、聚类或编解码；不导出 C ABI。

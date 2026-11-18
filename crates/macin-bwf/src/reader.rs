@@ -151,16 +151,24 @@ impl<R: Read + Seek> ChunkReader<R> {
     }
     /// Read one metadata chunk with an explicit caller budget. Never allocate unknown chunks on open.
     pub fn metadata(&mut self, id: [u8; 4], limit: u64) -> Result<Option<Vec<u8>>> {
-        let Some(chunk) = self.chunks.iter().find(|chunk| chunk.id == id).copied() else {
+        let Some(index) = self.chunks.iter().position(|chunk| chunk.id == id) else {
             return Ok(None);
         };
+        self.metadata_at(index, limit).map(Some)
+    }
+    /// 按已校验的 chunk 表下标读取载荷。可区分拥有相同 FourCC 的多个 LIST。
+    pub fn metadata_at(&mut self, index: usize, limit: u64) -> Result<Vec<u8>> {
+        let chunk = self
+            .chunks
+            .get(index)
+            .ok_or_else(|| Error::invalid("WAVE chunk 下标越界"))?;
         if chunk.size > limit {
             return Err(Error::unsupported("WAVE 元数据超过调用方预算"));
         }
         let mut data = bytes(chunk.size)?;
         self.source.seek(SeekFrom::Start(chunk.offset))?;
         self.source.read_exact(&mut data)?;
-        Ok(Some(data))
+        Ok(data)
     }
     /// Copy the first chunk with this id into `output`, which must hold exactly its payload.
     pub fn read_chunk(&mut self, id: [u8; 4], output: &mut [u8]) -> Result<bool> {
@@ -229,6 +237,9 @@ impl<R: Read + Seek> Reader<R> {
     }
     pub fn metadata(&mut self, id: [u8; 4], limit: u64) -> Result<Option<Vec<u8>>> {
         self.reader.metadata(id, limit)
+    }
+    pub fn metadata_at(&mut self, index: usize, limit: u64) -> Result<Vec<u8>> {
+        self.reader.metadata_at(index, limit)
     }
     pub fn read_chunk(&mut self, id: [u8; 4], output: &mut [u8]) -> Result<bool> {
         self.reader.read_chunk(id, output)
