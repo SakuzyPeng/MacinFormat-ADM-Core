@@ -1,7 +1,6 @@
 ## 简体中文
 
-MacinFormat ADM Core **v0.1.0** 首次发布三个 Rust 库与命令行工具 **mfadm**，提供 ADM 元数据编辑、
-WAVE 容器读写，以及 Atmos ADM BWF / DAMF 母版写入与转换。
+MacinFormat ADM Core **v0.2.0** 扩展了 ADM、Logic DBMD 与 DAMF 元数据往返，并修正了 96 kHz 母版的 bed 时间线。三个 Rust 库和命令行工具 **mfadm** 同步更新。
 
 ### 获取与安装
 
@@ -9,9 +8,9 @@ WAVE 容器读写，以及 Atmos ADM BWF / DAMF 母版写入与转换。
 
 | 你的电脑 | 下载哪个文件 |
 | --- | --- |
-| Apple 芯片 Mac | `mfadm-v0.1.0-aarch64-apple-darwin.tar.gz` |
-| Windows，Intel / AMD 64 位电脑 | `mfadm-v0.1.0-x86_64-pc-windows-msvc.zip` |
-| Linux，Intel / AMD 64 位电脑 | `mfadm-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Apple 芯片 Mac | `mfadm-v0.2.0-aarch64-apple-darwin.tar.gz` |
+| Windows，Intel / AMD 64 位电脑 | `mfadm-v0.2.0-x86_64-pc-windows-msvc.zip` |
+| Linux，Intel / AMD 64 位电脑 | `mfadm-v0.2.0-x86_64-unknown-linux-gnu.tar.gz` |
 
 macOS 和 Linux 解压后运行 `./mfadm --help`，Windows PowerShell 运行 `.\mfadm.exe --help`。
 也可将可执行文件所在目录加入 `PATH`，随后使用 `mfadm` 命令。
@@ -24,9 +23,9 @@ Rust 项目可通过 Cargo 集成三个库，要求 Rust 1.98 或更新版本。
 
 ```toml
 [dependencies]
-macin-adm = "=0.1.0"
-macin-bwf = "=0.1.0"
-macin-atmos = { version = "=0.1.0", features = ["read"] }
+macin-adm = "=0.2.0"
+macin-bwf = "=0.2.0"
+macin-atmos = { version = "=0.2.0", features = ["read"] }
 ```
 
 `macin-atmos` 的 `read` feature 启用 ADM / DAMF 母版读取与转换，默认配置提供母版写入。
@@ -34,14 +33,16 @@ macin-atmos = { version = "=0.1.0", features = ["read"] }
 
 ### 本次发布
 
-- **ADM 元数据**支持解析 AXML、解析引用、生成 Objects / DirectSpeakers / HOA 快照，以及保留原文的语义回写。
-- **WAVE 容器**支持 RIFF / RF64 / BW64、PCM 流式读写、帧定位及 `chna` / `bext` 等 chunk 的读取与编辑。
-- **四种母版配置**提供 Standard BW64、Logic RF64、DAMF Home 0.5.1 和 DAMF 3DoF 0.6.0。
-  支持固定 7.1.2 bed、最多 118 个对象、48 / 96 kHz、24-bit PCM 和按整数采样时间更新的对象元数据。
-- **读取与转换**支持 ADM 与 DAMF 互转、替换 WAV 音频，以及通过 `MultiWriter` 从同一输入一次写出多种配置。
-  ADM 母版读取逐块校验和投影，DAMF 读取使用两遍扫描。
-- **mfadm 命令**提供 `chunks`、`info`、`adm`、`axml` 和 `convert`，检查与转换结果可输出为 JSON。
-- **互操作验证**覆盖 EBU EAR、Conversion Tool、atmos_info，并记录了 Logic Pro 与 Dolby Atmos Renderer 的实机兼容结果。
+- ADM 可按所属层级保存节目、内容、对象、pack 和声道元数据，包括对象增益、静音、自定义区域、耳机虚拟化及轨道扩展属性。bed 支持分段增益、几何和活动时段。
+- Logic 可读写显式 Mid 与未指定的双耳模式、九种 trim 布局、FFOA、帧率及逐声道设置。DAMF 伴随文件的 DD+ 压缩配置可与 Logic 互转。
+- 96 kHz Logic 的相邻块保持采样边界。bed 起点的增益生效，节目外的块会被裁掉。超出时段或时钟范围的 bed 更新可在修正后重试。
+- `mfadm convert` 支持按字段选择 `--approximate` 和 `--preserve-literal`。JSON 报告区分损失、近似和原值保留。
+
+### 从 v0.1.0 升级
+
+- `ObjectState::gain` 和对象更新中的 gain 现在是 block 自身的增益。需要合并对象级增益和静音时，调用 `object.adm.effective_gain(block_gain)`。
+- `MasterSpec::trim_mode` 从 4 项扩展为 9 项，前四个索引保持原义。请更新显式数组初始化，以及对 `TrimConfiguration`、`WarpMode`、`DownmixMode` 等枚举的穷尽匹配。
+- 公开模型新增字段。使用结构体字面量的调用方可补齐字段，或在类型支持时使用 `..Default::default()`。手工往返含动态自定义区域的对象时，使用 `native_updates()` 与 `schedule_native_updates()`。
 
 ### 第一次使用
 
@@ -53,9 +54,9 @@ mfadm convert input.atmos --to standard=output.wav
 ```
 
 完整示例、格式规则与兼容性记录见对应版本文档。
-[中文上手说明](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.1.0/README.md) ·
-[格式参考](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.1.0/docs/REFERENCE.md) ·
-[验证记录](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.1.0/docs/VALIDATION.md)
+[中文上手说明](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.2.0/README.md) ·
+[格式参考](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.2.0/docs/REFERENCE.md) ·
+[验证记录](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.2.0/docs/VALIDATION.md)
 
 ### 支持范围
 
@@ -68,8 +69,7 @@ mfadm convert input.atmos --to standard=output.wav
 
 ## English
 
-MacinFormat ADM Core **v0.1.0** is the first release of three Rust libraries and the **mfadm** command-line
-tool, covering ADM metadata editing, WAVE containers, and Atmos ADM BWF / DAMF master writing and conversion.
+MacinFormat ADM Core **v0.2.0** expands metadata round trips across ADM, Logic DBMD and DAMF and fixes bed timing in 96 kHz masters. This release includes all three Rust libraries and the **mfadm** CLI.
 
 ### Download and install
 
@@ -77,9 +77,9 @@ Choose a CLI archive from **Assets** below, extract it and run the executable in
 
 | Your computer | File to download |
 | --- | --- |
-| Apple silicon Mac | `mfadm-v0.1.0-aarch64-apple-darwin.tar.gz` |
-| Windows, 64-bit Intel / AMD PC | `mfadm-v0.1.0-x86_64-pc-windows-msvc.zip` |
-| Linux, 64-bit Intel / AMD PC | `mfadm-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Apple silicon Mac | `mfadm-v0.2.0-aarch64-apple-darwin.tar.gz` |
+| Windows, 64-bit Intel / AMD PC | `mfadm-v0.2.0-x86_64-pc-windows-msvc.zip` |
+| Linux, 64-bit Intel / AMD PC | `mfadm-v0.2.0-x86_64-unknown-linux-gnu.tar.gz` |
 
 On macOS and Linux, run `./mfadm --help` after extraction. In Windows PowerShell, run `.\mfadm.exe --help`.
 Adding the executable's directory to `PATH` makes the `mfadm` command available from other directories.
@@ -92,27 +92,26 @@ Rust projects can use the libraries through Cargo with Rust 1.98 or newer.
 
 ```toml
 [dependencies]
-macin-adm = "=0.1.0"
-macin-bwf = "=0.1.0"
-macin-atmos = { version = "=0.1.0", features = ["read"] }
+macin-adm = "=0.2.0"
+macin-bwf = "=0.2.0"
+macin-atmos = { version = "=0.2.0", features = ["read"] }
 ```
 
 The `macin-atmos/read` feature enables ADM / DAMF master reading and conversion. The default configuration
 provides master writing. The three `.crate` attachments contain the corresponding library sources.
 
-### Included in this release
+### Changes in this release
 
-- **ADM metadata** provides AXML parsing, reference resolution, Objects / DirectSpeakers / HOA snapshots,
-  generation and source-preserving semantic edits.
-- **WAVE containers** support RIFF / RF64 / BW64, streaming PCM I/O, frame seeking, and reading or editing
-  chunks including `chna` and `bext`.
-- **Four master profiles** provide Standard BW64, Logic RF64, DAMF Home 0.5.1 and DAMF 3DoF 0.6.0, with a
-  fixed 7.1.2 bed, up to 118 objects, 48 / 96 kHz, 24-bit PCM and object updates timed in integer samples.
-- **Reading and conversion** cover ADM / DAMF conversion, replacement WAV audio, and multiple outputs from
-  one input through `MultiWriter`. ADM masters are validated and projected block by block, and DAMF reading uses two passes.
-- **The mfadm command** provides `chunks`, `info`, `adm`, `axml` and `convert`, with JSON inspection and conversion reports.
-- **Interoperability validation** covers EBU EAR, Conversion Tool and atmos_info, with recorded device-side
-  compatibility results for Logic Pro and Dolby Atmos Renderer.
+- ADM retains programme, content, object, pack and channel metadata at the owning level, including object gain and mute, custom exclusion zones, headphone virtualisation and track extension attributes. Beds support block-level gain, geometry and active intervals.
+- Logic reads and writes explicit Mid and unspecified binaural modes, nine trim layouts, first frame of action, frame rate and per-channel settings. DD+ compression profiles can move between Logic and DAMF sidecars.
+- Adjacent blocks retain their sample boundaries in 96 kHz Logic masters. Bed updates at the object start take effect, and conversion clips beds to the programme. A batch with an out-of-range bed update can be corrected and retried.
+- `mfadm convert` supports per-field `--approximate` and `--preserve-literal` options. JSON reports distinguish losses, approximations and literal preservation.
+
+### Upgrading from v0.1.0
+
+- `ObjectState::gain` and gain updates now hold the block’s own gain. Use `object.adm.effective_gain(block_gain)` to apply object gain and mute.
+- `MasterSpec::trim_mode` now has nine slots. The first four retain their previous indices. Update explicit array initialisers and exhaustive matches on enums such as `TrimConfiguration`, `WarpMode` and `DownmixMode`.
+- Public model structs have new fields. Supply them in struct literals or use `..Default::default()` where available. Manual round trips with changing custom zones use `native_updates()` and `schedule_native_updates()`.
 
 ### First use
 
@@ -124,9 +123,9 @@ mfadm convert input.atmos --to standard=output.wav
 ```
 
 Examples, format rules and compatibility results are available in the versioned documentation.
-[English quickstart](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.1.0/README.en.md) ·
-[Format reference](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.1.0/docs/REFERENCE.en.md) ·
-[Validation record](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.1.0/docs/VALIDATION.md)
+[English quickstart](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.2.0/README.en.md) ·
+[Format reference](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.2.0/docs/REFERENCE.en.md) ·
+[Validation record](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/blob/v0.2.0/docs/VALIDATION.md)
 
 ### Supported scope
 

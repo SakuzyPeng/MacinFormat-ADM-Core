@@ -541,8 +541,16 @@ pub fn build_logic_dbmd(
     let mut atmos = [0u8; 248];
     copy_dbmd_ascii(&mut atmos, 0, 32, originator)?;
     copy_dbmd_ascii(&mut atmos, 32, 64, product)?;
+    for (byte, component) in atmos[96..99].iter_mut().zip([
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR"),
+        env!("CARGO_PKG_VERSION_PATCH"),
+    ]) {
+        *byte = component
+            .parse()
+            .map_err(|_| "DBMD creator version exceeds its byte width")?;
+    }
     for (offset, value) in [
-        (97usize, 0x01u8), // content creation tool 0.1.0
         (111, frame_rate.dbmd_code()),
         (112, 0xff),
         (118, 0x03),

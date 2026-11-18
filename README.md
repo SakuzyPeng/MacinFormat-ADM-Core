@@ -62,16 +62,16 @@ ADM BWF 或 DAMF 形式的 Atmos 母版，也能把 DAMF 和 ADM BWF 读回同�
 
 ```toml
 [dependencies]
-macin-atmos = "=0.1.0"
+macin-atmos = "=0.2.0"
 # 只需要读写 ADM 或容器时，按需引入：
-macin-adm = "=0.1.0"
-macin-bwf = "=0.1.0"
+macin-adm = "=0.2.0"
+macin-bwf = "=0.2.0"
 ```
 
 读取 DAMF / ADM 母版或做转换时启用 `read`。
 
 ```toml
-macin-atmos = { version = "=0.1.0", features = ["read"] }
+macin-atmos = { version = "=0.2.0", features = ["read"] }
 ```
 
 源码也可通过 Git 依赖固定到具体提交。
@@ -81,7 +81,7 @@ macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev 
 ```
 
 `mfadm` 提供 macOS Apple 芯片、Windows x64 和 Linux x64 下载包，解压后在终端运行。
-[v0.1.0 发布页](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/releases/tag/v0.1.0)
+[v0.2.0 发布页](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/releases/tag/v0.2.0)
 
 ## 快速上手
 

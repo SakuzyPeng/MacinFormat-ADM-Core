@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/macin-adm", "crates/macin-bwf", "crates/macin-atmos", "crates/macin-format"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -11,9 +11,9 @@ repository = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core"
 publish = ["crates-io"]
 
 [workspace.dependencies]
-macin-adm = { path = "crates/macin-adm", version = "=0.1.0" }
-macin-bwf = { path = "crates/macin-bwf", version = "=0.1.0" }
-macin-atmos = { path = "crates/macin-atmos", version = "=0.1.0" }
+macin-adm = { path = "crates/macin-adm", version = "=0.2.0" }
+macin-bwf = { path = "crates/macin-bwf", version = "=0.2.0" }
+macin-atmos = { path = "crates/macin-atmos", version = "=0.2.0" }
 libm = "=0.2.16"
 quick-xml = { version = "=0.41.0", default-features = false }
 renamore = "=0.3.2"

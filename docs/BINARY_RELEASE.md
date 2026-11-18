@@ -1,6 +1,6 @@
 # mfadm 下载包与 GitHub 发布
 
-当前发布版本为 `v0.1.0`。面向使用者的中英文发布说明保存在
+当前发布版本为 `v0.2.0`。面向使用者的中英文发布说明保存在
 [packaging/release-notes.md](../packaging/release-notes.md)，Rust 库上传步骤见
 [crates.io 发布准备](CRATES_IO_RELEASE.md)。
 
@@ -29,7 +29,7 @@ python3 scripts/package_release.py --target aarch64-apple-darwin
 解包后的可执行文件还会将仓库示例生成的合成 ADM 转为 DAMF 再转回 ADM，检查往返文件逐字节一致。
 合成媒体使用临时目录，验证结束后清理。构建记录写明源码提交及工作树状态。
 
-可用 `--output-dir` 指定输出目录。对已准备好的标签，增加 `--release-tag v0.1.0`，检查它与 workspace 版本一致。
+可用 `--output-dir` 指定输出目录。对已准备好的标签，增加 `--release-tag v0.2.0`，检查它与 workspace 版本一致。
 
 ## CI 准备
 
@@ -55,8 +55,8 @@ python3 scripts/release_assets.py --directory artifacts/release
 4. 在该提交上创建并推送版本标签。
 
    ```sh
-   git tag -a v0.1.0 -m "MacinFormat ADM Core v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m "MacinFormat ADM Core v0.2.0"
+   git push origin v0.2.0
    ```
 
 标签触发 **Prepare release**，全部检查通过后，工作流以版本化源码构建新的附件并创建 GitHub Release 草稿。

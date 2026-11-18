@@ -73,16 +73,16 @@ The three libraries are distributed through crates.io and require Rust 1.98 or n
 
 ```toml
 [dependencies]
-macin-atmos = "=0.1.0"
+macin-atmos = "=0.2.0"
 # Pull in only what you need when you just read or write ADM or containers:
-macin-adm = "=0.1.0"
-macin-bwf = "=0.1.0"
+macin-adm = "=0.2.0"
+macin-bwf = "=0.2.0"
 ```
 
 Enable `read` to read DAMF or ADM masters, or to convert them.
 
 ```toml
-macin-atmos = { version = "=0.1.0", features = ["read"] }
+macin-atmos = { version = "=0.2.0", features = ["read"] }
 ```
 
 A Git dependency can also pin the source to a specific commit.
@@ -92,7 +92,7 @@ macin-atmos = { git = "https://github.com/SakuzyPeng/MacinFormat-ADM-Core", rev 
 ```
 
 `mfadm` provides archives for Apple silicon macOS, Windows x64 and Linux x64. Extract the archive and run it in a terminal.
-[v0.1.0 release](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/releases/tag/v0.1.0)
+[v0.2.0 release](https://github.com/SakuzyPeng/MacinFormat-ADM-Core/releases/tag/v0.2.0)
 
 ## Quickstart
 

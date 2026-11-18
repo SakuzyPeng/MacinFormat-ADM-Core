@@ -178,6 +178,11 @@ fn dbmd_bytes_match_verified_static_fields_and_validate_container_integrity() {
         .chain(spec.objects.iter().map(|o| o.initial.into()))
         .collect();
     let data = dbmd::build_from_spec(&spec, &channels).unwrap();
+    let creator = &payload(&data, 9)[96..99];
+    assert_eq!(
+        format!("{}.{}.{}", creator[0], creator[1], creator[2]),
+        env!("CARGO_PKG_VERSION")
+    );
     let atmos = payload(&data, 9);
     assert_eq!(
         (atmos[111], atmos[135], atmos[136], atmos[139], atmos[152]),
