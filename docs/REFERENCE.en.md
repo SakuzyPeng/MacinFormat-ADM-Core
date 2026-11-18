@@ -304,7 +304,7 @@ can run under `Reject`; it does not permit losses in other fields or change the 
 | `--approximate screen-ref-factor` / `screen_ref_factor` | Write ADM `screenRef` false/true as DAMF `screenFactor` 0/1. Write DAMF `screenFactor` zero as ADM false and nonzero as true. The continuous factor is not retained; an explicit zero turns the screen reference off again |
 
 These are approximations selected by the caller, not claims of equivalent rendering semantics or guarantees
-that another tool will retain them; see the [validation record](VALIDATION.md#dolby-conversion-tool-元数据映射对照).
+that another tool will retain them. See the [Conversion Tool comparison](VALIDATION.md#dolby-conversion-tool-元数据映射对照) and the [standalone Renderer audio and encoding measurements](VALIDATION.md#dolby-atmos-renderer-的-diffuse-与-decorr-实测).
 `--allow-loss` does not enable these approximations. Without the switch, same-format native diffuse / decorr remain supported; cross-format unmapped `diffuse`, `decorrelation`,
 `screenRef` and `screenFactor` information follows the loss policy. Dropping `screenFactor` preserves the
 existing native `screenRef` rather than setting it to true. If an approximation conflicts with an explicit

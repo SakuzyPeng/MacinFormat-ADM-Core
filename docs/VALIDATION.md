@@ -452,3 +452,30 @@ C 解析器还能跳过第 10 段的额外尾部，并只取自动 trim 标志�
 - 另核对分数时钟的半采样边界、无界块重叠、重复 WAVE DBMD 块、dialogue 扩展，以及自定义区域和原值角度在批量与流式 AXML 中的逐字节一致性。
 
 发布候选的 workspace 测试 186 项通过，实际写入超过 4 GiB 的用例按默认设置跳过。独立只写配置 40 项、Python 13 项通过，格式和两组 Clippy 检查均通过。
+
+## Dolby Atmos Renderer 的 diffuse 与 decorr 实测
+
+2026-11-17 至 18 在 macOS 27.2.1 arm64 实测。使用独立应用 Dolby Atmos Renderer **5.5.0 release** 导入、重渲染和编码，用 Dolby Reference Player **4.3.0.19350** 解码，用 ffprobe **8.0.1** 定位 MP4 音频包。本库夹具对应 `v0.2.0`（`5d75b8a`）。
+
+输入为 48 kHz、24-bit、24 fps 的 8 秒母版。十路 bed 静音，唯一发声的对象每秒重复同一段确定性宽带噪声，每段两端各留 125 ms 静音。全部输入的 11 声道 PCM 逐字节一致。基础场景包含点声源、均匀尺寸 0.75 的对象以及一次位置变化。
+
+- **ADM 输入**取自 Renderer 导出的 ADM BWF。在点声源和有尺寸对象的指定块上，分别省略 `diffuse`、显式写 0、0.5 或 1，其余 XML、DBMD 与音频相同。四份均能打开。0.5 是本次兼容性探针，Dolby Atmos Master ADM Profile v1.0 表 11 规定该元素出现时取 0 或 1。[Dolby ADM Profile，表 11](https://developer.dolby.com/globalassets/documentation/technology/dolby_atmos_master_adm_profile_v1.0.pdf#page=11)
+- **DAMF Home 输入**分别省略对象事件的 `decorr`、在每个事件显式写 0，以及自动化写入 1、0.5、0。在点声源和尺寸 0.75 两段均测试这些取值。
+
+| 比较的输出 | 实测范围 | 仅改变上述字段后的差异 |
+| --- | --- | --- |
+| Renderer 离线重渲染 WAV | 9.1.6 扬声器和 BIN 双耳，各 384,000 帧、24-bit PCM | 两种布局均为 0 个不同采样，峰值差 0 LSB |
+| Renderer 导出的 DD+ JOC | Music，768 kbps，252 个音频包 | 全部音频包逐字节一致 |
+| Renderer 导出的 AC-4 L3、L4 | Music，448 kbps，每种 190 个音频包 | 两种编码的全部音频包均逐字节一致 |
+| Reference Player 解码 WAV | DD+ 解到 5.1，384,000 帧。AC-4 L3、L4 各解到双声道，384,001 帧。输出均为 48 kHz、16-bit PCM | 三种解码输出均为 0 个不同采样 |
+
+比较 MP4 时包含预卷音频包，并单独核对音频解码配置、采样时间和编辑列表。只改变对象 X 坐标的阳性对照使 9.1.6 的 2,284,300 个声道采样、双耳的 610,942 个声道采样以及 DD+ 的 235/252 个音频包发生变化。只改变对象尺寸时，DD+、L3、L4 分别有 227、168、168 个音频包发生变化，三种解码 PCM 也都发生变化。
+
+**母版回写**也有可观察的规律。上述四份 ADM 和三份 DAMF 经 Renderer 重新导出的 AXML 逐字节一致。三份 DAMF 经 `Save .atmos copy as` 得到的事件元数据也逐字节一致。另将输入对象的 `decorr` 固定为 0，只改变均匀尺寸，再检查 ADM 导出和 DAMF 副本中的标记。
+
+| 输入尺寸（实测点） | ADM 导出的 `diffuse` | DAMF 副本的有效 `decorr` |
+| --- | --- | --- |
+| 0、0.01、0.015、0.016、0.02、0.025、0.03125 | 省略 | 0 |
+| 0.04、0.05、0.08、0.1、0.25、0.5、0.75、1 | 1 | 1 |
+
+因此，在这版 Renderer 的实测路径里，可以在转换到 DAMF 时丢弃独立的 ADM `diffuse` 并保留对象尺寸，得到相同的重渲染和编码音频。导出标记随尺寸变化，表中两组数值限定了观测范围。其他 ADM 渲染器及不同版本需分别验证。逐项输入、回写值、音频包与 PCM 的 SHA-256 记录在本地 `artifacts/audits/2026-11-18-renderer-diffuse/results.json`。

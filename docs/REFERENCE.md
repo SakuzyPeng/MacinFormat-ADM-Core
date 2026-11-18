@@ -247,7 +247,7 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
 | `--approximate screen-ref-factor` / `screen_ref_factor` | ADM `screenRef` 写 DAMF 时 false/true 映射为 `screenFactor` 0/1；DAMF `screenFactor` 写 ADM 时 0 为 false，非零为 true。连续因子不保留，显式归零可以再次关闭屏幕参考 |
 
 这些规则是调用方选择的近似，不声明参数的渲染语义等价，也不保证其他工具保留它们；工具实测见
-[验证记录](VALIDATION.md#dolby-conversion-tool-元数据映射对照)。`--allow-loss` 本身不会开启上述近似：
+[Conversion Tool 转换对照](VALIDATION.md#dolby-conversion-tool-元数据映射对照)和[独立 Renderer 的重渲染与编码实测](VALIDATION.md#dolby-atmos-renderer-的-diffuse-与-decorr-实测)。`--allow-loss` 本身不会开启上述近似：
 未选择开关时，同格式的原生 diffuse / decorr 正常保存；跨格式未映射的 `diffuse` / `decorrelation` / `screenRef` / `screenFactor` 按损失策略处理，
 其中 `screenFactor` 的降级是丢弃因子并保留已有的原生 `screenRef`，不自动把它设为 true。
 若近似与同一次更新中显式提供的目标字段冲突，或与非默认目标初始值冲突，`Reject` 拒绝；
