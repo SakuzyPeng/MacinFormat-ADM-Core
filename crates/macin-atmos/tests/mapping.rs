@@ -873,6 +873,18 @@ fn unsupported_attributes_extensions_and_container_chunks_are_reported() {
             "<audioPackFormat auditFlag=\"3\" ",
             "unknown_field",
         ),
+        (
+            5,
+            "</audioContent>",
+            r#"<dialogue dialogueContentKind="1" xmlns:v="urn:test" v:classifier="voice">1</dialogue></audioContent>"#,
+            "unknown_field",
+        ),
+        (
+            6,
+            "</audioContent>",
+            r#"<dialogue dialogueContentKind="1">1<v:classifier xmlns:v="urn:test"/></dialogue></audioContent>"#,
+            "unknown_field",
+        ),
     ] {
         let target = dir.path(&format!("extension-{index}.wav"));
         rewrite_xml(&source, &target, |s| s.replacen(before, after, 1));

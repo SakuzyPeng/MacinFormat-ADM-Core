@@ -687,6 +687,50 @@ pub fn boolean(text: &str) -> Result<u32> {
 }
 /// 将 ADM 小数或分数时间换算为整数采样，采用与文档投影相同的舍入方式。
 pub fn samples(time: &str, rate: u32) -> Result<u64> {
+    Ok(rounded_samples(sample_clock(time, rate)?.half_samples))
+}
+
+// 以半采样为整数单位，余数保留原时间分母。相加时只需判断余数是否进位。
+struct SampleClock {
+    half_samples: u128,
+    remainder: u128,
+    denominator: u128,
+}
+
+fn rounded_samples(half_samples: u128) -> u64 {
+    half_samples.div_ceil(2).min(u128::from(u64::MAX)) as u64
+}
+
+/// 将起点和可选时长换算为半开区间的两个采样端点。相邻块共用同一舍入边界。
+pub fn parse_time_bounds(
+    start: Option<&str>,
+    duration: Option<&str>,
+    rate: u32,
+) -> Result<(u64, Option<u64>)> {
+    let Some(start) = start else {
+        return Ok((0, duration.map(|text| samples(text, rate)).transpose()?));
+    };
+    let start = sample_clock(start, rate)?;
+    let end = duration
+        .map(|text| {
+            let span = sample_clock(text, rate)?;
+            // a/b + c/d >= 1 等价于 a*d >= (d-c)*b。比较完整乘积可兼容不同的分母。
+            let (left_lo, left_hi) = start.remainder.carrying_mul(span.denominator, 0);
+            let (right_lo, right_hi) =
+                (span.denominator - span.remainder).carrying_mul(start.denominator, 0);
+            let carry = (left_hi, left_lo) >= (right_hi, right_lo);
+            let end = start
+                .half_samples
+                .checked_add(span.half_samples)
+                .and_then(|v| v.checked_add(u128::from(carry)))
+                .ok_or_else(|| Error::xml("ADM 时间溢出"))?;
+            Ok(rounded_samples(end))
+        })
+        .transpose()?;
+    Ok((rounded_samples(start.half_samples), end))
+}
+
+fn sample_clock(time: &str, rate: u32) -> Result<SampleClock> {
     let (clock, fraction) = time
         .split_once('.')
         .ok_or_else(|| Error::xml("无效 ADM 时间"))?;
@@ -702,7 +746,7 @@ pub fn samples(time: &str, rate: u32) -> Result<u64> {
         .and_then(|n| parts[1].checked_mul(60).and_then(|m| n.checked_add(m)))
         .and_then(|n| n.checked_add(parts[2]))
         .ok_or_else(|| Error::xml("ADM 时间溢出"))?;
-    let ns = if let Some((n, d)) = fraction.split_once('S') {
+    let (numerator, denominator) = if let Some((n, d)) = fraction.split_once('S') {
         let numerator = n
             .parse::<u128>()
             .map_err(|_| Error::xml("无效 ADM 分数时间"))?;
@@ -712,10 +756,7 @@ pub fn samples(time: &str, rate: u32) -> Result<u64> {
         if denominator == 0 {
             return Err(Error::xml("ADM 时间分母为零"));
         }
-        numerator
-            .checked_mul(1_000_000_000)
-            .ok_or_else(|| Error::xml("ADM 时间溢出"))?
-            / denominator
+        (numerator, denominator)
     } else {
         if fraction.is_empty()
             || fraction.len() > 9
@@ -723,21 +764,24 @@ pub fn samples(time: &str, rate: u32) -> Result<u64> {
         {
             return Err(Error::xml("无效 ADM 小数时间"));
         }
-        fraction
+        let numerator = fraction
             .parse::<u128>()
-            .map_err(|_| Error::xml("无效 ADM 时间"))?
-            * 10u128.pow(9 - fraction.len() as u32)
+            .map_err(|_| Error::xml("无效 ADM 时间"))?;
+        (numerator, 10u128.pow(fraction.len() as u32))
     };
-    let ns = whole
-        .checked_mul(1_000_000_000)
-        .and_then(|v| v.checked_add(ns))
+    let scale = 2 * u128::from(rate);
+    let scaled = numerator
+        .checked_mul(scale)
         .ok_or_else(|| Error::xml("ADM 时间溢出"))?;
-    let value = ns
-        .checked_mul(u128::from(rate))
-        .and_then(|v| v.checked_add(500_000_000))
-        .ok_or_else(|| Error::xml("ADM 时间溢出"))?
-        / 1_000_000_000;
-    Ok(value.min(u128::from(u64::MAX)) as u64)
+    let half_samples = whole
+        .checked_mul(scale)
+        .and_then(|v| v.checked_add(scaled / denominator))
+        .ok_or_else(|| Error::xml("ADM 时间溢出"))?;
+    Ok(SampleClock {
+        half_samples,
+        remainder: scaled % denominator,
+        denominator,
+    })
 }
 
 pub(crate) fn validate_float_range(

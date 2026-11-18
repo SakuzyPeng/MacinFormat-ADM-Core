@@ -977,7 +977,7 @@ pub fn build_axml(spec: &MasterSpec, frames: u64, blocks: &[Vec<AdmBlock>]) -> R
                 .sample
                 .checked_add(block.duration)
                 .ok_or_else(|| Error::invalid("Block end overflow"))?;
-            write_adm_block_with_approximations(
+            write_native_object_block(
                 out,
                 i,
                 u32::try_from(j + 1).map_err(|_| Error::invalid("Too many ADM blocks"))?,
@@ -985,6 +985,8 @@ pub fn build_axml(spec: &MasterSpec, frames: u64, blocks: &[Vec<AdmBlock>]) -> R
                 spec.sample_rate,
                 spec.profile,
                 spec.approximate_mappings,
+                spec.preserve_literal,
+                &spec.objects[i].custom_zones,
             )?;
         }
         if end != frames {

@@ -94,17 +94,28 @@ pub struct AdmBedBlock {
 }
 impl AdmBedBlock {
     #[cfg(feature = "read")]
-    pub(crate) fn clip_end(&mut self, origin: u64, frames: u64) -> Result<()> {
+    /// 原节目外的块没有有效采样。节目内的块仍需由替换音频覆盖其起点。
+    pub(crate) fn clip_to_audio(
+        &mut self,
+        origin: u64,
+        programme_end: Option<u64>,
+        frames: u64,
+    ) -> Result<bool> {
         let start = origin
             .checked_add(self.timing.start.unwrap_or(0))
             .ok_or_else(|| Error::invalid("Bed block start overflow"))?;
+        if programme_end.is_some_and(|end| start >= end) {
+            return Ok(false);
+        }
         let remaining = frames
+            .min(programme_end.unwrap_or(frames))
             .checked_sub(start)
+            .filter(|&n| n != 0)
             .ok_or_else(|| Error::invalid("Replacement audio ends before a bed block starts"))?;
         if let Some(duration) = &mut self.timing.duration {
             *duration = (*duration).min(remaining);
         }
-        Ok(())
+        Ok(true)
     }
     pub(crate) fn validate(&self) -> Result<()> {
         if self.channel >= BED_CHANNELS {

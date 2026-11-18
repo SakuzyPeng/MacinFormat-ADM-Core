@@ -1,5 +1,49 @@
 //! 和对象相同，bed 按文件范围逐块投影。首块保存在 spec，后续块可重放。
 use super::*;
+
+/// 保留节目内的 bed 窗口。某声道完全在节目外时用零时长的静音首块维持固定声道布局。
+pub(super) fn clip_spec(
+    spec: &mut MasterSpec,
+    origin: u64,
+    programme_end: Option<u64>,
+    frames: u64,
+) -> Result<()> {
+    let end = frames.min(programme_end.unwrap_or(frames));
+    if let Some(timing) = &mut spec.bed_timing {
+        if programme_end.is_some_and(|p| origin >= p) {
+            *timing = AdmTiming {
+                start: Some(0),
+                duration: Some(0),
+            };
+        } else if timing.end().is_some_and(|s| s > end)
+            || (timing.duration.is_none() && end < frames)
+        {
+            timing.duration = Some(end.saturating_sub(origin));
+        }
+    }
+    for channel in 0..BED_CHANNELS {
+        if let Some(first) = &mut spec.bed_blocks[channel]
+            && !first.clip_to_audio(origin, programme_end, frames)?
+        {
+            spec.bed_geometry[channel] = AdmMetadata::default();
+            spec.bed_blocks[channel] = Some(metadata::bed_state_block(
+                spec,
+                channel,
+                BedState {
+                    gain: Gain::Silence,
+                    importance: 1.,
+                    ..spec.bed[channel]
+                },
+                AdmTiming {
+                    start: None,
+                    duration: Some(0),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct BedTimeline {
     pub slot: usize,

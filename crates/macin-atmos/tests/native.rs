@@ -1,4 +1,6 @@
 use macin_atmos::*;
+#[path = "native/bed_timing.rs"]
+mod bed_timing;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -57,6 +59,33 @@ fn element(name: &str, attrs: &[(&str, &str)], text: &str) -> AdmElement {
         text: text.into(),
         children: vec![],
     }
+}
+
+#[test]
+fn batch_axml_preserves_the_same_zones_and_literal_ranges_as_the_streaming_writer() {
+    let dir = Temp::new();
+    let mut s = spec();
+    s.preserve_literal.cartesian_azimuth_range = true;
+    s.objects[0].custom_zones = vec![ExclusionZone {
+        name: "left region".into(),
+        bounds: ZoneBounds::Cartesian([-1., 0., -1., 1., -1., 1.]),
+    }];
+    s.objects[0].initial.divergence = Some(ObjectDivergence {
+        value: 0.5,
+        azimuth_range: Some(45.),
+        position_range: None,
+    });
+    let blocks = [vec![metadata::AdmBlock {
+        sample: 0,
+        duration: 4800,
+        ramp_samples: 0,
+        state: s.objects[0].initial,
+    }]];
+    let batch = metadata::build_axml(&s, 4800, &blocks).unwrap();
+    assert!(batch.contains("left region") && batch.contains(r#"azimuthRange="45""#));
+    let path = dir.path("stream.wav");
+    write(&path, s, &[]);
+    assert_eq!(batch.as_bytes(), chunk(&path, *b"axml"));
 }
 fn metadata(attrs: &[(&str, &str)], elements: Vec<AdmElement>) -> AdmMetadata {
     AdmMetadata {

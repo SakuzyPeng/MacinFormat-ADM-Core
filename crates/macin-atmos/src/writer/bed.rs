@@ -1,6 +1,6 @@
 use super::*;
 
-/// 绝对采样区间是 bed 对象时段与声道 block 时段的交集。缺省 end 延续到下一块或节目末尾。
+/// 绝对采样区间是 bed 对象时段与声道 block 时段的交集。未指定时长的块延续到对象末尾。
 pub(super) fn interval(spec: &MasterSpec, block: &AdmBedBlock) -> Result<(u64, Option<u64>)> {
     let object = spec.bed_timing.unwrap_or_default();
     let origin = object.start.unwrap_or(0);
@@ -150,30 +150,31 @@ impl MasterWriter {
                     self.spec.profile,
                 )?;
             } else {
-                if let Some(stop) = *previous_end {
-                    if stop > sample {
-                        loss(
-                            self.spec.loss_policy,
+                if previous_end.is_none_or(|stop| stop > sample) {
+                    loss(
+                        self.spec.loss_policy,
+                        None,
+                        Some(sample),
+                        "bed_timing",
+                        "Overlapping ADM bed blocks have no single DAMF state; using the later block",
+                        &mut diagnostics,
+                    )?;
+                } else if let Some(stop) = *previous_end
+                    && stop < sample
+                    && stop >= *last
+                {
+                    bytes.extend_from_slice(
+                        metadata::damf_bed_event(
+                            b.channel as u32,
+                            stop,
+                            BedPatch {
+                                active: Some(false),
+                                ..Default::default()
+                            },
                             None,
-                            Some(sample),
-                            "bed_timing",
-                            "Overlapping ADM bed blocks have no single DAMF state; using the later block",
-                            &mut diagnostics,
-                        )?;
-                    } else if stop < sample && stop >= *last {
-                        bytes.extend_from_slice(
-                            metadata::damf_bed_event(
-                                b.channel as u32,
-                                stop,
-                                BedPatch {
-                                    active: Some(false),
-                                    ..Default::default()
-                                },
-                                None,
-                            )?
-                            .as_bytes(),
-                        );
-                    }
+                        )?
+                        .as_bytes(),
+                    );
                 }
                 state.active = end.is_none_or(|end| sample < end);
                 bytes.extend_from_slice(

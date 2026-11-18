@@ -1,6 +1,6 @@
 use crate::{
     Document, Error, Result,
-    document::{boolean, canonical_id, number, samples},
+    document::{boolean, canonical_id, number, parse_time_bounds, samples},
     records::*,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -289,9 +289,9 @@ impl Snapshot {
         for key in doc.of_type("audioObject") {
             let n = doc.node(key);
             let source_gain = gain(doc, key)?;
-            let start = time_attr(doc, key, "start", rate)?.unwrap_or(0);
+            let (start, end) = parse_time_bounds(n.attr("start"), n.attr("duration"), rate)?;
             let absolute = offsets[&key];
-            let duration = time_attr(doc, key, "duration", rate)?;
+            let duration = end.map(|end| end - start);
             let locked = bool_element(doc, key, "headLocked", 0)?;
             let mut object = Object {
                 node: key,
@@ -538,10 +538,11 @@ impl Snapshot {
                     },
                 };
                 for block in blocks {
-                    let begin =
-                        start.saturating_add(time_attr(doc, block, "rtime", rate)?.unwrap_or(0));
-                    let finish = time_attr(doc, block, "duration", rate)?
-                        .map_or(end, |d| begin.saturating_add(d).min(end));
+                    let node = doc.node(block);
+                    let (relative, stop) =
+                        parse_time_bounds(node.attr("rtime"), node.attr("duration"), rate)?;
+                    let begin = start.saturating_add(relative);
+                    let finish = stop.map_or(end, |s| start.saturating_add(s).min(end));
                     self.hoa_blocks.push(HoaBlock {
                         node: block,
                         gain: gain(doc, block)?.linear,
@@ -622,13 +623,14 @@ fn gain(doc: &Document, key: u32) -> Result<Gain> {
     })
 }
 fn block_source(doc: &Document, key: u32, rate: u32) -> Result<BlockSource> {
-    let duration = time_attr(doc, key, "duration", rate)?;
+    let node = doc.node(key);
+    let (start, end) = parse_time_bounds(node.attr("rtime"), node.attr("duration"), rate)?;
     Ok(BlockSource {
         gain: gain(doc, key)?,
-        rtime_present: u32::from(doc.node(key).attr("rtime").is_some()),
-        rtime_samples: time_attr(doc, key, "rtime", rate)?.unwrap_or(0),
-        duration_present: u32::from(duration.is_some()),
-        duration_samples: duration.unwrap_or(0),
+        rtime_present: u32::from(node.attr("rtime").is_some()),
+        rtime_samples: start,
+        duration_present: u32::from(end.is_some()),
+        duration_samples: end.map_or(0, |end| end - start),
     })
 }
 fn position(doc: &Document, key: u32, name: &str, offset: bool) -> Result<AdmPosition> {

@@ -21,6 +21,7 @@
 - **原生映射**：DBMD 字节布局与完整性检查、静态与动态通道参数的边界、区域预设及严格边界匹配、
   bed 更新流与多目标原子性、节目范围裁切、content 分组及独立格式名称；原生 ADM 参数和分层元数据往返，
   WAVE/CAF 附加块的条件透传、预算、布局变化及跨格式损失检查。
+  bed 回归覆盖 96 kHz Logic 相邻块、非零起点增益、节目外的块、无界块重叠与越界批次重试。批量 AXML 与流式输出逐字节对照，并检查重复 DBMD 块和 dialogue 扩展的诊断。
 
 已有实测覆盖 macOS arm64 与 Windows x64。CI（`.github/workflows/ci.yml`）在 macOS arm64、Windows x64 与 Linux x64
 上跑同一套检查，另含互操作检查器、发布归档和产物核验的 Python 回归

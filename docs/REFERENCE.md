@@ -52,7 +52,7 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
   不会重启其他属性上既有的 ramp。属性缺省表示继承。
 - `MasterSpec::bed` 保存十个规范声道的初始状态。`BedUpdate::channel` 是 `BED_LABELS` 中从 0 开始的位置，
   不占用对象的 `TrackId`；通过 `schedule_bed_updates` 调度。gain、DAMF bed 的 position/extent 更新必须提供 ramp，纯离散更新不重启 ramp。
-  单个调用会先校验全部更新；`MultiWriter` 会在全部目标通过后才提交。
+  状态更新必须落在 bed 对象的半开时段内，起点更新决定首块的有效状态。整批更新在写入前校验采样顺序、对象时段和目标时钟范围。`MultiWriter` 会在全部目标通过后才提交。
 - `MasterSpec::contents` 为空时生成默认单组；自定义分组必须引用所有对象和固定 bed，允许对象跨组引用，
   不允许单组重复或未知对象；生成的 content ID 空间最多容纳 0xefff 组。`ObjectSpec::pack_name` / `channel_names` 与 `bed_channel_names` 保存独立格式名称，
   未指定时按默认约定生成。共享的 `macin_adm::records` 布局不变。
@@ -134,8 +134,8 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
   bed 使用 `bed_adm` / `bed_pack_adm` / `bed_channel_adm`。不会把对象或 pack importance 覆盖到 block importance，
   对象层的 gain、mute 和 positionOffset 保留原所属层。读取的 `ObjectState::gain` 及更新中的 gain 是 block 自身的增益。`ObjectSpec::adm.effective_gain(block_gain)` 可计算实际增益。写 DAMF 时才合并这两层，PCM 样本保持原值。
 - `MasterSpec::bed_timing` 保存 bed 相对节目的起点、可选时长。`bed_blocks[channel]` 保存该声道首个 `AdmBedBlock`。block 的 `timing.start` 是相对于 **bed 对象** 的 rtime。后续块经 `AdmReader::bed_blocks()` 流式读取，用 `schedule_adm_bed_blocks` 提交。同一声道选定原生块后，后续继续使用这个接口。单独用状态编写时可使用 `bed_geometry` 和 `schedule_bed_updates`。两种写法都支持单目标与多目标。
-  ADM 输出保留逐块时长、空隙、重叠、备用坐标、bound、screenEdgeLock 及标签顺序。转 DAMF 时起止和空隙映射为各声道的 active 事件。重叠的块按 `bed_timing` 报告，Allow 采用后一个块。DAMF 无法保存的多标签或非规范扬声器位置按 `bed_position` 报告。
-- `ObjectSpec::custom_zones` 保存自定义区域的初值。`native_updates()` / `native_updates_for_frames` 和 `schedule_native_updates` 传递 `NativeObjectUpdate`，含原数值事件以及可选区域列表。None 表示继承，空列表表示清除。原 `updates()` 提供数值部分，完整手工往返应使用原生更新接口。只改区域时数值 patch 可以为空。合法 Cartesian 六边界、极坐标四边界、标签和多区域顺序均可写回。自定义区域与预设或独立关闭 elevation 冲突会报错。
+  ADM 输出保留逐块时长、空隙、重叠、备用坐标、bound、screenEdgeLock 及标签顺序。转 DAMF 时起止和空隙映射为各声道的 active 事件。省略时长的块延续到 bed 对象末尾。重叠的块按 `bed_timing` 报告，Allow 采用后一个块。DAMF 无法保存的多标签或非规范扬声器位置按 `bed_position` 报告。
+- `ObjectSpec::custom_zones` 保存自定义区域的初值。`native_updates()` / `native_updates_for_frames` 和 `schedule_native_updates` 传递 `NativeObjectUpdate`，含原数值事件以及可选区域列表。None 表示继承，空列表表示清除。原 `updates()` 提供数值部分，完整手工往返应使用原生更新接口。只改区域时数值 patch 可以为空。合法 Cartesian 六边界、极坐标四边界、标签和多区域顺序均可写回。自定义区域与预设或独立关闭 elevation 冲突会报错。批量 `metadata::build_axml` 对各对象块使用该对象的自定义区域及 `MasterSpec::preserve_literal`。
   对象和 bed 均可原生保存 headphoneVirtualise 的可选 bypass 和 DRR（−130..130 dB）。自定义区域或此耳机参数写 DAMF 时分别报告 `zone`、`headphone_virtualise`。
 - 已识别静态元数据包括 programme/content 的语言、标签和 loudnessMetadata、programme 的参考屏幕与 maxDuckingDepth、
   object 的标签、positionOffset、importance、dialogue、interact、disableDucking 及 audioObjectInteraction 范围，
@@ -199,19 +199,19 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
   `jumpPosition` 为 1 时 ramp 取 `interpolationLength`（不超过 block 长度），没写 `jumpPosition` 时在整个 block 内插值。
   对象的 `start` / `duration` 变成激活与停用的更新，结束点还受最后一个有限 block 的结束时间约束。
   换用更长的 WAV 也保留停用边界；`updates_for_frames` 按实际音频长度提供更新，`updates` 返回原文件长度下的更新。
-  对象级 gain 和 mute 保存在对象元数据中，block 增益保持独立。
+  块起点与终点各自换算为整数采样，时长取两端之差。对象级 gain 和 mute 保存在对象元数据中，block 增益保持独立。
   ADM 没有 active 标志：写入器把不活动的对象写成 gain 0，读回就是静音增益。
 - **节目范围**：programme start 进入 start_sample。显式 end 必须晚于 start，且持续时间不能超过音频。
   原音频的 `audio()` 只交付节目持续时间内的样本，转换不再把 end 扩成音频文件总长。
-  显式替换 WAV 仍按替换长度输出，并保留来源节目、对象和 bed 的有限停用边界。缩短替换音频时 bed 时长截到输出范围，后续事件仍须有对应音频。
+  显式替换 WAV 仍按替换长度输出，并保留来源节目、对象和 bed 的有限停用边界。bed 对象及其块裁到原节目与输出音频的交集。原节目结束点及以后的块跳过，整路都在节目外时写为零时长静音块。换用更短的音频仍须覆盖原节目内各块的起点。
 - **头锁与区域**：对象级 headLocked 为 block 的缺省值，block 可以覆盖；缺省的 block 不继承前一个 block 的覆盖。
   名称、边界和完整组合都匹配时，区域使用已验证预设（含 ZB/ZT elevation）。其他完整的自定义区域按原值保存。省略 zoneExclusion 时恢复 All / elevation=true 并清除自定义列表。
 - **DBMD** 按源声道号读取静态通道参数，与音频一起重排。XML 头锁冲突时 Reject 报错，Allow 采用 DBMD 并诊断。已验证的 1.0.0.5 至 1.0.0.8 段布局可读，Logic 保留来源版本，新建块使用 1.0.0.6。帧率取第 9 段帧率字节的低四位，原高位在 Logic 中保留。未知版本报 `dbmd`，未知帧率、头追、双耳、warp、下混或非法相移按相应字段报告。
-- `dbmd_source` 保存原生段顺序。Logic 保留 EBU 的 Dolby E（1）、Dolby Digital（3）、DD+（7）、Audio Info（8）、其他不透明载荷和保留字节。多个节目的同类段可重复。第 1、9、10 段各自只允许一个。可在结束标记后放一个对齐字节，长度码 0 表示 65,535 字节，校验使用线上的长度低字节。坏校验、截断和非法长度直接拒绝。第 10 段可带扩展尾部，声道计数须等于输入声道数或为零。
+- `dbmd_source` 保存原生段顺序。Logic 保留 EBU 的 Dolby E（1）、Dolby Digital（3）、DD+（7）、Audio Info（8）、其他不透明载荷和保留字节。多个节目的同类段可重复。同一 WAVE 中多个 `dbmd` 块属于无效输入。块内第 1、9、10 段各自只允许一个。可在结束标记后放一个对齐字节，长度码 0 表示 65,535 字节，校验使用线上的长度低字节。坏校验、截断和非法长度直接拒绝。第 10 段可带扩展尾部，声道计数须等于输入声道数或为零。
 - 仅在原音频、声道顺序、采样率、节目起点与时长匹配时透传与布局关联的不透明编码数据。目标无法保存原生载荷时，Reject 拒绝，Allow 记录 `dbmd_encoding` 并写出可映射值。已建模的压缩配置、逐声道参数及自动/手动 trim 由模型更新。DBMD 及旧 DAMF 伴随文件各限 1 MiB。
 - **ID 与声道**：对象按轨道号排序，`TrackId` 是对象在文件里的轨道号（从 1 起）；`wave_audio` 用 WAV 代替音频时，
   第 n 个声道对应第 n + 1 条轨道。没有 bed 的文件写出一组静音 bed。
-- **读取阶段的损失**包括未映射元素和属性（`unknown_field`）、不完整或包含未识别字段的区域（`zone`）、对象位置的 bound（`position_bound`）、多个或嵌套 pack 引用（`pack_structure`）。可解析的完整原生字段留到目标写出时判断。附加块遵循前述容器规则。
+- **读取阶段的损失**包括未映射元素和属性（`unknown_field`，包括 content 的 `dialogue` 扩展属性和子元素）、不完整或包含未识别字段的区域（`zone`）、对象位置的 bound（`position_bound`）、多个或嵌套 pack 引用（`pack_structure`）。可解析的完整原生字段留到目标写出时判断。附加块遵循前述容器规则。
 - stream 可显式引用该轨道所属的 pack。ADM 写出时将该引用绑定到新生成的 pack ID。重复、悬空或冲突的引用按 `pack_structure` 处理。
 - **轨道扩展属性**保存在 `ChannelNames::extensions` 的 stream、track、uid 中。ADM 输出在原所属元素写出前缀、命名空间 URI、局部名和值，并声明值中使用的已知命名空间前缀。换行、制表符按 XML 字符引用转义。值里的供应商私有标识符和相对路径作为不透明文本保存。写 DAMF 遇到这些属性时报告 `track_extensions`。
 - **直接拒绝**：多个 programme、多个 bed、不完整或非 7.1.2 的 bed、极坐标对象、多声道 `Objects`、嵌套对象、

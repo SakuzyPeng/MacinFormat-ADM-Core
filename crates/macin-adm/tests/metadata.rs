@@ -1,4 +1,18 @@
 use macin_adm::{Document, Patch, Snapshot, Speaker, generate};
+
+#[test]
+fn fractional_and_decimal_times_share_their_rounded_endpoints() {
+    use macin_adm::{parse_time, parse_time_bounds};
+    // 1/6 + 1/3 个采样正好落在半采样，单独舍入两段都会得到零。
+    let (_, end) =
+        parse_time_bounds(Some("00:00:00.1S576000"), Some("00:00:00.1S288000"), 96_000).unwrap();
+    assert_eq!(end, Some(1));
+    assert_eq!(parse_time("00:00:00.1S192000", 96_000).unwrap(), 1);
+    assert_eq!(
+        parse_time_bounds(Some("00:00:00.04167"), Some("00:00:00.04166"), 96_000).unwrap(),
+        (4000, Some(8000))
+    );
+}
 fn document(inner: &str) -> String {
     format!(
         "<?xml version=\"1.0\"?><ebuCoreMain><coreMetadata><format><audioFormatExtended>{inner}</audioFormatExtended></format></coreMetadata></ebuCoreMain>"

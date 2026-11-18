@@ -206,17 +206,13 @@ fn bounds(doc: &Document, rate: u32) -> Result<(u64, u64)> {
         .into_iter()
         .find(|&n| doc.element_name(n) == Some("audioBlockFormat"))
         .ok_or_else(|| Error::invalid("声道片段缺少 block"))?;
-    let start = doc
-        .element_attribute(block, "rtime")
-        .map(|v| macin_adm::parse_time(v, rate).map_err(adm_error))
-        .transpose()
-        .map(|v| v.unwrap_or(0))?;
-    let end = doc
-        .element_attribute(block, "duration")
-        .map(|v| macin_adm::parse_time(v, rate).map_err(adm_error))
-        .transpose()?
-        .map_or(u64::MAX, |duration| start.saturating_add(duration));
-    Ok((start, end))
+    let (start, end) = macin_adm::parse_time_bounds(
+        doc.element_attribute(block, "rtime"),
+        doc.element_attribute(block, "duration"),
+        rate,
+    )
+    .map_err(adm_error)?;
+    Ok((start, end.unwrap_or(u64::MAX)))
 }
 
 pub(super) struct Index {

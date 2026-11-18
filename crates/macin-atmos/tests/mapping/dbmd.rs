@@ -1,5 +1,28 @@
 use super::*;
 
+#[cfg(feature = "read")]
+#[test]
+fn duplicate_wave_dbmd_chunks_are_invalid_under_both_policies() {
+    let dir = Temp::new();
+    let path = dir.path("duplicate.wav");
+    write(&path, spec(Profile::Logic), &[], &[]);
+    let other = dbmd::build_logic_dbmd(11, FrameRate::Fps25, "", "").unwrap();
+    let mut wave = fs::read(&path).unwrap();
+    wave.extend_from_slice(b"dbmd");
+    wave.extend_from_slice(&(other.len() as u32).to_le_bytes());
+    wave.extend_from_slice(&other);
+    let riff_size = (wave.len() as u64 - 8).to_le_bytes();
+    wave[20..28].copy_from_slice(&riff_size);
+    fs::write(&path, wave).unwrap();
+    for policy in [LossPolicy::Reject, LossPolicy::Allow] {
+        let error = adm::AdmReader::open(&path, policy).unwrap_err();
+        assert_eq!(
+            (error.kind, error.field),
+            (ErrorKind::InvalidInput, Some("dbmd"))
+        );
+    }
+}
+
 #[test]
 fn dbmd_ebu_segments_keep_programmes_checksum_padding_and_wire_lengths() {
     // EBU 的零长度码代表 65535 字节，校验初值取线上的长度低字节。

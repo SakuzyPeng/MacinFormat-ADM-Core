@@ -764,6 +764,15 @@ impl MasterWriter {
                     "Use native bed blocks consistently on this channel",
                 ));
             }
+            if self
+                .spec
+                .bed_timing
+                .and_then(AdmTiming::end)
+                .is_some_and(|end| event.sample >= end)
+            {
+                return Err(Error::invalid("Bed event lies outside its object duration"));
+            }
+            metadata::sample_time(event.sample, self.spec.sample_rate, self.spec.profile)?;
             if event.patch.has_continuous() != event.ramp_samples.is_some() {
                 return Err(Error::invalid(
                     "Continuous bed properties require an explicit ramp; discrete updates must not reset it",
@@ -860,11 +869,11 @@ impl MasterWriter {
     }
 
     fn commit_beds(&mut self, prepared: PreparedBeds) -> Result<()> {
+        let origin = self.spec.bed_timing.and_then(|t| t.start).unwrap_or(0);
         for (event, state, raw_gain) in prepared.events {
             let track = &mut self.beds[event.channel];
             let result = if self.spec.profile.is_adm() {
                 if event.sample > track.last_event {
-                    let origin = self.spec.bed_timing.and_then(|t| t.start).unwrap_or(0);
                     let b = metadata::bed_state_block(
                         &self.spec,
                         event.channel,
@@ -905,6 +914,8 @@ impl MasterWriter {
             track.last_event = event.sample;
             if event.sample == 0 {
                 track.initial_static = state.object_state().into();
+            }
+            if event.sample == origin {
                 self.spec.bed[event.channel] = BedState {
                     gain: raw_gain.unwrap_or(self.spec.bed[event.channel].gain),
                     ..state

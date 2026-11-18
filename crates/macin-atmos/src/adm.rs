@@ -1232,6 +1232,17 @@ impl AdmReader {
         let mut wave = Reader::new(BufReader::new(File::open(path)?))?;
         let info = wave.info();
         let rate = info.format.sample_rate;
+        let mut dbmd_chunks = wave
+            .chunks()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.id == *b"dbmd");
+        let dbmd_index = dbmd_chunks.next().map(|(index, _)| index);
+        if dbmd_chunks.next().is_some() {
+            let mut error = Error::invalid("Duplicate WAVE dbmd chunk");
+            error.field = Some("dbmd");
+            return Err(error);
+        }
         let axml = wave
             .chunks()
             .iter()
@@ -1275,9 +1286,7 @@ impl AdmReader {
         let index = Index::read(path, axml, rate)?;
         let doc = Document::parse_with_track_uids(&index.xml, &definitions).map_err(adm_error)?;
         let scene = Snapshot::extract(&doc, rate, &tracks).map_err(adm_error)?;
-        let profile = if info.container == Container::Rf64
-            && wave.chunks().iter().any(|c| &c.id == b"dbmd")
-        {
+        let profile = if info.container == Container::Rf64 && dbmd_index.is_some() {
             Profile::Logic
         } else {
             Profile::Standard
@@ -1315,7 +1324,8 @@ impl AdmReader {
             diagnostics: Vec::new(),
             dbmd_channels: None,
         };
-        if let Some(bytes) = wave.metadata(*b"dbmd", dbmd::DBMD_LIMIT as u64)? {
+        if let Some(index) = dbmd_index {
+            let bytes = wave.metadata_at(index, dbmd::DBMD_LIMIT as u64)?;
             let mut losses = Losses {
                 policy: options.loss_policy,
                 diagnostics: &mut diagnostics,
@@ -1580,6 +1590,8 @@ impl AdmReader {
                             "2" => (ContentKind::Mixed, "mixedContentKind"),
                             _ => return Err(Error::invalid("Invalid content dialogue")),
                         };
+                    s.attributes(child, &[attribute], None, losses)?;
+                    s.children(child, &[], None, losses)?;
                     let subtype = s
                         .doc
                         .element_attribute(child, attribute)
@@ -1969,13 +1981,6 @@ impl AdmReader {
         let frames = audio.frames();
         let mut diagnostics = self.diagnostics.clone();
         let mut spec = self.spec.clone();
-        if frames > self.frames
-            && let Some(end) = self.programme_duration
-            && let Some(timing) = &mut spec.bed_timing
-            && timing.end().is_none_or(|v| v > end)
-        {
-            timing.duration = Some(end.saturating_sub(timing.start.unwrap_or(0)));
-        }
         if !original_audio {
             let mut losses = Losses {
                 policy: spec.loss_policy,
@@ -2029,23 +2034,16 @@ impl AdmReader {
             }
         }
         let bed_origin = spec.bed_timing.and_then(|t| t.start).unwrap_or(0);
-        let shorter = frames < self.frames;
-        if shorter {
-            if let Some(t) = &mut spec.bed_timing
-                && let Some(duration) = &mut t.duration
-            {
-                *duration = (*duration).min(frames.saturating_sub(bed_origin));
-            }
-            for b in spec.bed_blocks.iter_mut().flatten() {
-                b.clip_end(bed_origin, frames)?;
-            }
-        }
-        let bed_blocks = self.bed_blocks().map(|r| {
-            let mut b = r?;
-            if shorter {
-                b.clip_end(bed_origin, frames)?;
-            }
-            Ok(b)
+        bed::clip_spec(&mut spec, bed_origin, self.programme_duration, frames)?;
+        let bed_blocks = self.bed_blocks().filter_map(|block| {
+            block
+                .and_then(|mut b| {
+                    Ok(
+                        b.clip_to_audio(bed_origin, self.programme_duration, frames)?
+                            .then_some(b),
+                    )
+                })
+                .transpose()
         });
         let updates = self.native_updates_for_frames(frames)?;
         let last_sample = self.last_change.max(

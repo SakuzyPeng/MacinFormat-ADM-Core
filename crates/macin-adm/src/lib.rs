@@ -10,7 +10,7 @@ pub mod records;
 mod xml;
 
 pub use document::{
-    Document, QualifiedAttribute, TrackUidDefinition, boolean as parse_boolean,
+    Document, QualifiedAttribute, TrackUidDefinition, boolean as parse_boolean, parse_time_bounds,
     samples as parse_time,
 };
 pub use generate::{GeneratedMetadata, Speaker, generate};
