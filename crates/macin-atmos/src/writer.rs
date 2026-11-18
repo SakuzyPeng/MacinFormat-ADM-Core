@@ -1745,13 +1745,13 @@ fn mapped(
             "binaural_mode",
             "Writing literal DAMF mid; Dolby Conversion Tool 2.1.2 rejects this value",
         );
-    } else if profile != Profile::Standard && state.binaural_mode == BinauralMode::Mid {
+    } else if !profile.is_adm() && state.binaural_mode == BinauralMode::Mid {
         loss(
             policy,
             Some(id),
             Some(sample),
             "binaural_mode",
-            "Mid has no verified encoding; using undefined",
+            "Portable DAMF uses undefined for the default Mid distance; the explicit Mid indication would be lost",
             diagnostics,
         )?;
         state.binaural_mode = BinauralMode::Undefined;
@@ -2041,14 +2041,15 @@ fn mapped_bed(
                 BED_LABELS[channel]
             ),
         );
-    } else if state.binaural_mode == BinauralMode::Mid {
+    } else if !profile.is_adm() && state.binaural_mode == BinauralMode::Mid {
         loss(
             policy,
             None,
             Some(sample),
             "bed_binaural_mode",
             &format!(
-                "Bed {} Mid mode has no verified encoding; using the default",
+                "Portable DAMF uses {} for bed {}; the explicit Mid indication would be lost",
+                metadata::binaural_name(default.binaural_mode),
                 BED_LABELS[channel]
             ),
             diagnostics,

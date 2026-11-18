@@ -76,6 +76,81 @@ fn object(sample: u64, patch: ObjectPatch) -> ObjectUpdate {
 }
 
 #[test]
+fn logic_preserves_explicit_mid_and_unspecified_on_separate_channels() {
+    let dir = Temp::new();
+    let mut spec = spec(Profile::Logic);
+    spec.objects
+        .push(ObjectSpec::new(TrackId(78), "Default distance"));
+    spec.bed[0].binaural_mode = BinauralMode::Mid;
+    spec.objects[0].initial.head_tracking = HeadTracking::HeadRelative;
+    spec.objects[0].initial.binaural_mode = BinauralMode::Mid;
+    let path = dir.path("mid.wav");
+    let report = write(&path, spec, &[], &[]);
+    assert!(report.diagnostics.is_empty());
+
+    // 低三位：3 是显式 Mid，4 是未指定。高两位仍属于头追设置。
+    let bytes = chunk(&path, *b"dbmd");
+    let modes = &payload(&bytes, 10)[142 + 12..];
+    assert_eq!(
+        [modes[0], modes[1], modes[3], modes[10], modes[11]],
+        [0x43, 0x44, 0x40, 0x03, 0x44]
+    );
+    let decoded = dbmd::read(&bytes, 12).unwrap();
+    assert!(decoded.unsupported.is_empty());
+    let channels = decoded.channels.unwrap();
+    assert_eq!(channels[0].binaural_mode, BinauralMode::Mid);
+    assert_eq!(channels[10].binaural_mode, BinauralMode::Mid);
+    assert_eq!(channels[11].binaural_mode, BinauralMode::Undefined);
+
+    #[cfg(feature = "read")]
+    {
+        let reader = adm::AdmReader::open(&path, LossPolicy::Reject).unwrap();
+        let output = dir.path("copy.wav");
+        let result = reader
+            .convert(
+                reader.audio().unwrap(),
+                &[Target {
+                    path: output.clone(),
+                    profile: Profile::Logic,
+                }],
+            )
+            .unwrap();
+        assert!(result.read.is_empty() && result.outputs[0].diagnostics.is_empty());
+        assert_eq!(chunk(&output, *b"dbmd"), bytes);
+
+        let home_path = dir.path("home");
+        let targets = [Target {
+            path: home_path.clone(),
+            profile: Profile::DamfHome,
+        }];
+        let rejected = reader
+            .convert(reader.audio().unwrap(), &targets)
+            .unwrap_err();
+        assert_eq!(rejected.field, Some("binaural_mode"));
+        let allowed = adm::AdmReader::open(path, LossPolicy::Allow).unwrap();
+        let report = allowed.convert(allowed.audio().unwrap(), &targets).unwrap();
+        assert!(report.read.is_empty());
+        let losses = &report.outputs[0].diagnostics;
+        assert_eq!(losses.len(), 2);
+        for field in ["binaural_mode", "bed_binaural_mode"] {
+            assert!(
+                losses
+                    .iter()
+                    .any(|d| d.kind == MappingDiagnosticKind::Loss && d.field == field)
+            );
+        }
+        let home =
+            damf::DamfReader::open(home_path.join("master.atmos"), LossPolicy::Reject).unwrap();
+        assert_eq!(
+            home.spec().objects[0].initial.binaural_mode,
+            BinauralMode::Undefined
+        );
+        assert_eq!(home.spec().bed[0].binaural_mode, BinauralMode::Undefined);
+        assert_eq!(home.spec().bed[3].binaural_mode, BinauralMode::Off);
+    }
+}
+
+#[test]
 fn dbmd_bytes_match_verified_static_fields_and_validate_container_integrity() {
     let mut spec = spec(Profile::Logic);
     spec.frame_rate = FrameRate::Fps25;
@@ -991,7 +1066,11 @@ fn unknown_dbmd_segments_can_be_dropped_but_known_values_are_retained() {
             .field,
         "dbmd"
     );
-    for (name, field) in [("frame", "frame_rate"), ("head", "head_tracking")] {
+    for (name, field) in [
+        ("frame", "frame_rate"),
+        ("head", "head_tracking"),
+        ("reserved-binaural", "binaural_mode"),
+    ] {
         let mut edited = dbmd::DBMD_VERSION.to_vec();
         for id in [7, 9, 10] {
             let mut value = payload(&chunk(&source, *b"dbmd"), id).to_vec();
@@ -1000,6 +1079,9 @@ fn unknown_dbmd_segments_can_be_dropped_but_known_values_are_retained() {
             }
             if name == "head" && id == 10 {
                 value[142 + 11 + 10] = 0xc4;
+            }
+            if name == "reserved-binaural" && id == 10 {
+                value[142 + 11 + 10] = 0x45;
             }
             dbmd::append_dbmd_segment(&mut edited, id, &value).unwrap();
         }
@@ -1022,11 +1104,15 @@ fn unknown_dbmd_segments_can_be_dropped_but_known_values_are_retained() {
         assert_eq!(read.diagnostics()[0].field, field);
         if name == "frame" {
             assert_eq!(read.spec().frame_rate, FrameRate::Fps24);
-        } else {
+        } else if name == "head" {
             assert_eq!(
                 read.spec().objects[0].initial.head_tracking,
                 HeadTracking::Undefined
             );
+        } else {
+            let state = read.spec().objects[0].initial;
+            assert_eq!(state.binaural_mode, BinauralMode::Undefined);
+            assert_eq!(state.head_tracking, HeadTracking::SceneRelative);
         }
     }
 }

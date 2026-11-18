@@ -91,6 +91,7 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
   支持对象动态变化；Undefined 无布尔对应，按损失处理。Logic 在 DBMD 中表达三种静态值，不写 XML 头锁。
 - Logic 的头追、耳机模式和 trimBypass 取第 0 个采样的有效状态，包含在写音频前提交的 sample=0 更新。
   之后的变化在 Reject 下拒绝，Allow 保留初始值并诊断。Standard 无耳机模式和 trimBypass 的精确通路。
+- 普通对象和非 LFE bed 声道的默认双耳距离是 Mid，bed LFE 固定为 Off。Logic DBMD segment 10 的耳机模式低三位分别用 3 表示显式 Mid、4 表示未指定（普通声道默认 Mid）。本库按原码读写两种静态标记。[Logic Pro 用户指南](https://support.apple.com/zh-cn/guide/logicpro/lgcp789f000d/mac)、[MediaInfo 的 DBMD 模式表](https://github.com/MediaArea/MediaInfoLib/blob/v26.01/Source/MediaInfo/Audio/File_DolbyAudioMetadata.cpp#L52-L59)
 - ADM bed 支持对象级 gain/mute 和独立时段，每路 DirectSpeakers block 可以保存 gain、0..10 的 importance、整个扬声器标签列表、几何和 headphoneVirtualise。Standard 可逐块保存 headLocked。Logic 头追、耳机和 trimBypass 使用静态 DBMD。
 - DAMF bed 保留 active、gain、importance、头追、耳机和 trim，以及 `BedRendering` 中显式提供的 position、extent、snap、zone、elevation、decorrelation、dialog、music、screen_factor、depth_factor。动态清零/关闭也会写回。目标为 ADM 时，缺少精确表示的渲染属性按各自的 `bed_*` 诊断。active=false 在 Allow 下写成静音增益，非零 DAMF bed ramp 在 ADM 中按 `bed_ramp` 拒绝或诊断后写终值。
 - `MasterSpec::start_sample` 是节目外部起点；对象和 bed 的事件仍从音频第 0 个采样计时。
@@ -264,13 +265,13 @@ WAVE 元数据按调用方给定的预算读取，打开文件时不分配未知
 | 字段 | 已授权的写法 |
 | --- | --- |
 | `cartesian-azimuth-range` | 在 Cartesian 对象块上保留旧 azimuthRange 原值。这种拼写超出 BS.2076-2 对该坐标系的约定，不进行角度到距离换算。两种 range 并存仍拒绝。 |
-| `damf-mid` | 在 DAMF 的对象或 bed 上原样写入 `binauralRenderMode: mid`。Dolby Conversion Tool 2.1.2 拒绝此文本。该开关不赋予 Logic DBMD 新编码。 |
+| `damf-mid` | 在 DAMF 的对象或 bed 上原样写入 `binauralRenderMode: mid`。Dolby Conversion Tool 2.1.2 拒绝此文本。Logic DBMD 直接保存显式 Mid，无需开关。 |
 
 `MappingDiagnostic::kind` 区分 Loss、Approximation 和 PreservedLiteral。CLI 在 `read_losses` 或 `outputs[].losses` 返回 `kind`，取值分别为 `loss`、`approximation`、`preserved_literal`。文字输出对应 lost、approximate、preserved。后两种选择记在对应目标，每条轨道、字段只记首次，无须 `--allow-loss`，其他字段的损失仍按原策略处理。
 
 - 不猜测任意区域到预设、内容类别到 dialog/music 标志或连续 screen/depth factor 的等价关系。
 - Logic DBMD 仅保存已验证的静态字段；动态头追、耳机和 trimBypass 变化必须拒绝或诊断后保留初始值。
-- 已验证的 DAMF 耳机值为 undefined / off / near / far；未选择原值写入时，Mid 默认拒绝，Allow 对对象采用 undefined、对 bed 采用该声道默认值。
+- 需要 DAMF 的默认中距离时，使用 `BinauralMode::Undefined`，对应 `binauralRenderMode: undefined`。首事件省略字段时普通声道采用默认值，后续事件省略字段则沿用前值，显式 undefined 可从 Near/Far 回到默认。显式 Mid 转便携 DAMF 会失去“显式指定”的区别，Reject 拒绝，Allow 记录损失并写 undefined（LFE 写 off）。[工具对照](VALIDATION.md#双耳中距离的显式值与默认值)
 - ADM importance 量化为 0..10，非整十的分值会报告损失。
 - 音频 24-bit 量化和所选时钟精度属于已声明的格式行为，不算损失。DAMF 不写节目名，同样不算损失。
 

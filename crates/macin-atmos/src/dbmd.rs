@@ -246,6 +246,7 @@ pub fn read(data: &[u8], channel_count: usize) -> crate::Result<ReadMetadata> {
                         0 => BinauralMode::Off,
                         1 => BinauralMode::Near,
                         2 => BinauralMode::Far,
+                        3 => BinauralMode::Mid,
                         4 => BinauralMode::Undefined,
                         _ => {
                             result.unsupported.push((
@@ -349,13 +350,8 @@ pub fn build_from_spec(
             BinauralMode::Off => 0,
             BinauralMode::Near => 1,
             BinauralMode::Far => 2,
+            BinauralMode::Mid => 3,
             BinauralMode::Undefined => 4,
-            BinauralMode::Mid => {
-                return Err(Error::new(
-                    crate::ErrorKind::Unsupported,
-                    "Mid has no verified DBMD encoding",
-                ));
-            }
         };
     }
     let mut out = DBMD_VERSION.to_vec();

@@ -108,6 +108,7 @@ ITU-R BS.2088-2 Annex 1 §2.1, §4 and §5.
 - Logic takes head tracking, headphone mode and trimBypass from the effective state at sample zero,
   including sample-zero updates submitted before audio. Later changes fail under Reject; Allow keeps the
   initial value and reports the loss. Standard has no exact headphone-mode or trimBypass mapping.
+- The default binaural distance for objects and non-LFE bed channels is Mid. Bed LFE is fixed to Off. In Logic DBMD segment 10 the low three binaural mode bits distinguish 3 (explicit Mid) from 4 (not indicated, defaulting to Mid on ordinary channels). The library preserves both static codes. [Logic Pro guide](https://support.apple.com/guide/logicpro/lgcp789f000d/mac), [MediaInfo DBMD mode table](https://github.com/MediaArea/MediaInfoLib/blob/v26.01/Source/MediaInfo/Audio/File_DolbyAudioMetadata.cpp#L52-L59)
 - ADM beds carry object gain/mute and an independent time span. Each DirectSpeakers block can carry gain, integer importance (0–10), its full speaker label list, geometry and headphoneVirtualise. Standard can change headLocked per block. Logic stores static head tracking, headphone mode and trimBypass in DBMD.
 - DAMF beds retain active, gain, importance, head tracking, headphone mode and trim, plus explicit position, extent, snap, zone, elevation, decorrelation, dialog, music and screen/depth factors in `BedRendering`. Updates include resets and switches back to false. ADM targets report unsupported rendering fields individually as `bed_*`. Under Allow an inactive channel is rendered as zero metadata gain. A nonzero DAMF bed ramp follows `bed_ramp` on ADM output. Allow writes the target value.
 - `MasterSpec::start_sample` is the external programme offset; object and bed events remain relative to
@@ -328,7 +329,7 @@ Reading nonzero `diffuse` or writing it back to ADM needs no approximation switc
 | Field | Authorised output |
 | --- | --- |
 | `cartesian-azimuth-range` | Write a legacy azimuthRange literally on a Cartesian object block. This falls outside the BS.2076-2 coordinate convention. There is no angle-to-distance conversion. Supplying both range types remains invalid. |
-| `damf-mid` | Write literal `binauralRenderMode: mid` on a DAMF object or bed. Dolby Conversion Tool 2.1.2 rejects this spelling. The switch supplies no Logic DBMD encoding. |
+| `damf-mid` | Write literal `binauralRenderMode: mid` on a DAMF object or bed. Dolby Conversion Tool 2.1.2 rejects this spelling. Logic DBMD stores explicit Mid directly without a switch. |
 
 `MappingDiagnostic::kind` distinguishes Loss, Approximation and PreservedLiteral. CLI `read_losses` / `outputs[].losses` use `kind` values `loss`, `approximation` and `preserved_literal`. Text output shows lost, approximate and preserved. Both explicit choices report the first occurrence per target, track and field, work under Reject, and leave unrelated losses subject to the selected policy.
 
@@ -336,7 +337,7 @@ Reading nonzero `diffuse` or writing it back to ADM needs no approximation switc
   flags, or continuous screen/depth factors.
 - Logic DBMD stores only verified static fields; dynamic head tracking, headphone and trimBypass changes
   must be rejected or diagnosed while retaining the initial values.
-- The verified DAMF headphone values are undefined / off / near / far. Without literal preservation Mid is rejected by default. Allow uses undefined for an object and the channel default for a bed.
+- To request DAMF's default middle distance, use `BinauralMode::Undefined`, written as `binauralRenderMode: undefined`. Omission on the first event selects the channel default. Later omission inherits the preceding value, while explicit undefined can reset Near/Far to the default. Converting explicit Mid to portable DAMF loses the explicit indication. Reject refuses it and Allow reports the loss and writes undefined (off for bed LFE). [Tool comparison](VALIDATION.md#双耳中距离的显式值与默认值)
 - ADM importance is quantised to 0..10, and scores that are not a multiple of ten report a loss.
 - 24-bit audio quantisation and the precision of the chosen clock are declared format behaviour, not loss;
   neither is DAMF leaving out the programme name.

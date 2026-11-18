@@ -184,10 +184,12 @@ pub enum HeadTracking {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BinauralMode {
+    /// 未指定距离（DBMD 码 4）。普通对象和非 LFE bed 声道默认采用中距离。
     #[default]
     Undefined,
     Off,
     Near,
+    /// 显式中距离（DBMD 码 3），保留与默认中距离的标记区别。
     Mid,
     Far,
 }

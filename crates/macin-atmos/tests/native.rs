@@ -1727,6 +1727,7 @@ mod remaining {
                 fs::read(copy.join(f)).unwrap()
             );
         }
+        // 静态 Mid 可写入 Logic DBMD，bed 的 DAMF 位置仍有独立的能力检查。
         assert_eq!(
             r.convert(
                 r.audio().unwrap(),
@@ -1734,7 +1735,7 @@ mod remaining {
             )
             .unwrap_err()
             .field,
-            Some("binaural_mode")
+            Some("bed_position")
         );
     }
 }

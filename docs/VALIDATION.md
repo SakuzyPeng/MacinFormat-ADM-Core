@@ -376,3 +376,18 @@ CLI 的 SHA-256 为 `597ab41772ba97b403374891b2c8a418a72600395d64bccb1affbff27f3
 另用本库的输出做了十组 Dolby 对照，另有一次参考母版生成。ADM 工具输入采用 RIFF、同规格合成母版的参考 DBMD 和五位时钟，所有测试时点在转换时均可精确表示。六组产生输出且无校验诊断，但测试的 bed 增益/静音/优先级、动态 bed 头锁、耳机虚拟化、供应商属性、旧角度范围或 DAMF bed snap 被省略或重写。两组带校验错误仍生成文件：短 bed 被扩展，自定义区域被省略。这两组未计入通过。带额外 `Alternate` 标签的 bed 以及使用 mid 的 DAMF 被该版本工具拒绝。八份实际生成的输出均核对了 PCM 哈希。
 
 逐项输出、命令、工具日志与检查结果在 `artifacts/audits/2026-11-17-remaining-implementation/`。合成媒体已清理。
+
+## 双耳中距离的显式值与默认值
+
+2026-11-17 在 macOS 27.2.1 arm64 实测。基线为 `1fc19d8` 加本次修正，使用 Dolby Atmos Conversion Tool `2.1.2_07765940`、MediaInfoLib 26.01、Rust 1.98.0 和 Python 3.13.2。合成母版为 48 kHz、12 声道、96,000 帧。
+
+| 对照输入 | 实测输出 |
+| --- | --- |
+| DAMF 首事件省略 binauralRenderMode，或显式写 undefined | 两组经 Dolby 转换后，普通 bed 声道和对象都写 undefined，DBMD 低三位为 4。LFE 都写 off，低三位为 0。near、far、off 对照分别得到 1、2、0。 |
+| DAMF 对象写字面 mid | 转 DAMF 和转 ADM 都以 255 退出，日志为 `Unsupported binauralRenderMode: mid`，没有生成输出文件。 |
+| DBMD segment 10 的同一普通声道分别取 3、4 | 保持头追和其他位不变，改写后重算校验和。MediaInfo 分别显示 Mid、Not Indicated (Mid)。Dolby 读取两种合法校验和的输入后都导出 undefined，再写 DBMD 时都采用 4。把 3 放在 LFE 上时，Dolby 导出 off。 |
+| 对象先写 near，采样 24,000 处的事件只更新 snap，或同时写 undefined | Dolby 的 DAMF 输出分别省略后续事件的耳机字段、显式写入 undefined。前者沿用 near，后者重置到默认。 |
+
+对三组不同的 DBMD 码位排列，把同一载荷放入 PCM 和声道布局一致的合成 Logic 容器，分别用 mfadm 默认严格模式读回再写两次。普通 bed 和对象的 3、4，以及对照 LFE 原始码均逐字节保留，PCM 一致，无映射诊断。这个对照隔离了 AXML 结构，直接读 Dolby 工具生成的参考 AXML 还有独立的 stream→pack 引用限制。测试观测文件元数据，渲染默认值的依据见[Logic Pro 用户指南](https://support.apple.com/zh-cn/guide/logicpro/lgcp789f000d/mac)和[Dolby Renderer 指南](https://professional.dolby.com/siteassets/content-creation/dolby-atmos/dolby_atmos_renderer_guide.pdf)。
+
+共 9 个场景、19 次 Dolby 转换和 6 次 mfadm 转换。自动回归另测了保留码 5 的拒绝与诊断，以及显式 Mid 转便携 DAMF 时显式标记的损失。仓库六项检查通过，工作区 171 项通过、1 项真实 4 GiB 测试保持 ignored，独立只写配置 34 项、Python 13 项通过。最终 mfadm SHA-256 为 `d16f4aa4921d875b3c92889e88dd883258e695ca03ace29d6c32b8dad0044d2d`。对照脚本和结果存于 `artifacts/audits/2026-11-17-binaural-mid/`，合成媒体已清理。
